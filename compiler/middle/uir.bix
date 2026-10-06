@@ -1,0 +1,844 @@
+# uir.bix - hardware-independent 3-address virtual register IR
+
+
+# --- Core Universal Opcode Constants (retained in const_tbl) ---
+let UIR_CONST = 1;
+let UIR_MOVE = 2;
+let UIR_ADD = 10;
+let UIR_SUB = 11;
+let UIR_MUL = 12;
+let UIR_DIV = 13;
+let UIR_LOAD = 42;
+let UIR_STORE = 43;
+let UIR_FUNCTION_START = 50;
+let UIR_FUNCTION_END = 51;
+let UIR_LABEL = 53;
+let UIR_JUMP = 54;
+let UIR_BRANCH = 55;
+let UIR_CALL = 56;
+let UIR_RETURN = 57;
+# (Remaining opcodes: CAST=3, NEG=15, AND=20, OR=21, XOR=22, NOT=23, SHL=24, SHR=25,
+#  CMP_NE=31, CMP_LE=33, CMP_GT=34, CMP_GE=35, SELECT=36, ALLOC_STACK=40, ADDR_OF=41,
+#  INDEX_ADDR=44, PARAM=52, ARG=58, F_IMM1=1, F_IMM2=2, F_SIDE_EFFECT=4)
+
+# Arithmetic
+
+# Bitwise & Shifts
+
+# Comparisons
+
+# Memory & Addressing
+
+# Control Flow & Functions
+
+
+# ------------------------------------------------------------------------------
+# Flat Memory UIR Buffer Management
+# Memory layout:
+#   Header (offsets 0..255):
+#     [qword 0]: node_count
+#     [qword 1]: next_vreg_id
+#     [qword 2]: next_label_id
+#     [qword 3]: func_count
+#     [qword 4..31]: reserved
+#   Nodes (offset 256 onwards, 64 bytes / 8 qwords per node):
+#     slot 0: opcode
+#     slot 1: type_id
+#     slot 2: flags
+#     slot 3: prov
+#     slot 4: dst
+#     slot 5: src1
+#     slot 6: src2
+#     slot 7: extra
+# ------------------------------------------------------------------------------
+
+fn uir_init(buf: i64): i64 {
+    set_qword(buf, 0, 0); # node_count = 0
+    set_qword(buf, 1, 0); # next_vreg_id = 0
+    set_qword(buf, 2, 0); # next_label_id = 0
+    set_qword(buf, 3, 0); # func_count = 0
+    set_qword(buf, 4, 1430932817); # UIR Magic: 0x55495231
+    return 0;
+}
+
+
+fn uir_get_count(buf: i64): i64 {
+    return get_qword(buf, 0);
+}
+
+fn uir_node_addr(buf: i64, idx: i64): i64 {
+    return buf + 256 + (idx * 64);
+}
+
+fn uir_op(addr: i64): i64 {
+    return get_qword(addr, 0);
+}
+
+fn uir_src1(addr: i64): i64 {
+    return get_qword(addr, 5);
+}
+
+fn uir_src2(addr: i64): i64 {
+    return get_qword(addr, 6);
+}
+
+fn uir_emit(buf: i64, op: i64, type_id: i64, flags: i64, prov: i64, dst: i64, src1: i64, src2: i64, extra: i64): i64 {
+    let count = get_qword(buf, 0);
+    let addr = buf + 256 + (count * 64);
+    set_qword(addr, 0, op);
+    set_qword(addr, 1, type_id);
+    set_qword(addr, 2, flags);
+    set_qword(addr, 3, prov);
+    set_qword(addr, 4, dst);
+    set_qword(addr, 5, src1);
+    set_qword(addr, 6, src2);
+    set_qword(addr, 7, extra);
+    set_qword(buf, 0, count + 1);
+    return count;
+}
+
+
+# ------------------------------------------------------------------------------
+# Universal Optimizations on UIR
+# Hardware-independent, target-agnostic optimization passes.
+# ------------------------------------------------------------------------------
+
+fn uir_opt_const_fold(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let const_map = sys_mmap_page();
+    let changed = 0;
+    let i = 0;
+    while i < total {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let fl = get_qword(addr, 2);
+
+        if (op == 50) | (op == 51) | (op == 53) | (op == 54) | (op == 55) {
+            let ci = 0;
+            while ci < 256 {
+                set_qword(const_map, ci * 2 + 0, 0);
+                ci = ci + 1;
+            }
+        }
+
+        if op == 1 { # CONST
+            if dst < 250 {
+                set_qword(const_map, dst * 2 + 0, 1);
+                set_qword(const_map, dst * 2 + 1, s1);
+            }
+        } else {
+            if (dst >= 0) & (dst < 250) {
+                if (op != 50) & (op != 51) & (op != 53) & (op != 54) & (op != 55) & (op != 57) & (op != 58) {
+                    set_qword(const_map, dst * 2 + 0, 0);
+                }
+            }
+        }
+
+        let is_bin = 0;
+        if (op >= 10) & (op <= 14) { is_bin = 1; }
+        if (op >= 20) & (op <= 25) { is_bin = 1; }
+        if (op >= 30) & (op <= 35) { is_bin = 1; }
+
+        if is_bin == 1 {
+            let is_c1 = fl & 1;
+            let val1 = s1;
+            if is_c1 == 0 {
+                if s1 < 250 {
+                    if get_qword(const_map, s1 * 2 + 0) == 1 {
+                        is_c1 = 1;
+                        val1 = get_qword(const_map, s1 * 2 + 1);
+                    }
+                }
+            }
+            let is_c2 = (fl >> 1) & 1;
+            let val2 = s2;
+            if is_c2 == 0 {
+                if s2 < 250 {
+                    if get_qword(const_map, s2 * 2 + 0) == 1 {
+                        is_c2 = 1;
+                        val2 = get_qword(const_map, s2 * 2 + 1);
+                    }
+                }
+            }
+
+            if (is_c1 == 1) & (is_c2 == 1) {
+                let folded = 0;
+                let valid = 1;
+                # Arithmetic
+                if op == 10 { folded = val1 + val2; }
+                if op == 11 { folded = val1 - val2; }
+                if op == 12 { folded = val1 * val2; }
+                if op == 13 { if val2 != 0 { folded = val1 / val2; } else { valid = 0; } }
+                if op == 14 { if val2 != 0 { folded = val1 % val2; } else { valid = 0; } }
+                # Bitwise
+                if op == 20 { folded = val1 & val2; }
+                if op == 21 { folded = val1 | val2; }
+                if op == 22 { folded = val1 ^ val2; }
+                if op == 24 { folded = val1 << val2; }
+                if op == 25 { folded = val1 >> val2; }
+                # Comparisons
+                if op == 30 { if val1 == val2 { folded = 1; } else { folded = 0; } }
+                if op == 31 { if val1 != val2 { folded = 1; } else { folded = 0; } }
+                if op == 32 { if val1 < val2 { folded = 1; } else { folded = 0; } }
+                if op == 33 { if val1 <= val2 { folded = 1; } else { folded = 0; } }
+                if op == 34 { if val1 > val2 { folded = 1; } else { folded = 0; } }
+                if op == 35 { if val1 >= val2 { folded = 1; } else { folded = 0; } }
+
+                if valid == 1 {
+                    set_qword(addr, 0, 1); # op = CONST
+                    set_qword(addr, 2, 1); # flags = IMM1
+                    set_qword(addr, 5, folded);
+                    set_qword(addr, 6, 0);
+                    if dst < 250 {
+                        set_qword(const_map, dst * 2 + 0, 1);
+                        set_qword(const_map, dst * 2 + 1, folded);
+                    }
+                    changed = changed + 1;
+                }
+            } else {
+                # Algebraic identities
+                let id_done = 0;
+                # ADD: x + 0 -> x, 0 + x -> x
+                if op == 10 {
+                    if (is_c2 == 1) & (val2 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (is_c1 == 1) & (val1 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, (fl >> 1) & 1); set_qword(addr, 5, s2); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # SUB: x - 0 -> x, x - x -> 0
+                if op == 11 {
+                    if (is_c2 == 1) & (val2 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & ((fl & 3) == 0) & (s1 == s2) {
+                        set_qword(addr, 0, 1); set_qword(addr, 2, 1); set_qword(addr, 5, 0); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # MUL: x * 1 -> x, 1 * x -> x, x * 0 -> 0, 0 * x -> 0
+                if op == 12 {
+                    if (is_c2 == 1) & (val2 == 1) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (is_c1 == 1) & (val1 == 1) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, (fl >> 1) & 1); set_qword(addr, 5, s2); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (((is_c2 == 1) & (val2 == 0)) | ((is_c1 == 1) & (val1 == 0))) {
+                        set_qword(addr, 0, 1); set_qword(addr, 2, 1); set_qword(addr, 5, 0); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # DIV: x / 1 -> x
+                if op == 13 {
+                    if (is_c2 == 1) & (val2 == 1) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # AND: x & 0 -> 0, 0 & x -> 0
+                if op == 20 {
+                    if ((is_c2 == 1) & (val2 == 0)) | ((is_c1 == 1) & (val1 == 0)) {
+                        set_qword(addr, 0, 1); set_qword(addr, 2, 1); set_qword(addr, 5, 0); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # OR: x | 0 -> x, 0 | x -> x
+                if op == 21 {
+                    if (is_c2 == 1) & (val2 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (is_c1 == 1) & (val1 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, (fl >> 1) & 1); set_qword(addr, 5, s2); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # XOR: x ^ x -> 0, x ^ 0 -> x, 0 ^ x -> x
+                if op == 22 {
+                    if ((fl & 3) == 0) & (s1 == s2) {
+                        set_qword(addr, 0, 1); set_qword(addr, 2, 1); set_qword(addr, 5, 0); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (is_c2 == 1) & (val2 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                    if (id_done == 0) & (is_c1 == 1) & (val1 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, (fl >> 1) & 1); set_qword(addr, 5, s2); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+                # SHL, SHR: x << 0 -> x, x >> 0 -> x
+                if (op == 24) | (op == 25) {
+                    if (is_c2 == 1) & (val2 == 0) {
+                        set_qword(addr, 0, 2); set_qword(addr, 2, fl & 1); set_qword(addr, 5, s1); set_qword(addr, 6, 0);
+                        changed = changed + 1; id_done = 1;
+                    }
+                }
+            }
+        }
+
+        # Fold UIR_RETURN with constant operand: RETURN vreg -> RETURN imm
+        if op == 57 { # UIR_RETURN
+            let is_c = fl & 1;
+            if is_c == 0 {
+                if (s1 >= 0) & (s1 < 250) {
+                    if get_qword(const_map, s1 * 2 + 0) == 1 {
+                        let cval = get_qword(const_map, s1 * 2 + 1);
+                        set_qword(addr, 2, 1); # flags = IMM1
+                        set_qword(addr, 5, cval); # s1 = cval
+                        changed = changed + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_strength_reduce(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let changed = 0;
+    let i = 0;
+    while i < total {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+        let fl = get_qword(addr, 2);
+        let s2 = get_qword(addr, 6);
+        let imm2 = (fl >> 1) & 1;
+
+        if (op == 12) & (imm2 == 1) { # MUL by imm
+            let shift_amt = -1;
+            if s2 == 2 { shift_amt = 1; }
+            if s2 == 4 { shift_amt = 2; }
+            if s2 == 8 { shift_amt = 3; }
+            if s2 == 16 { shift_amt = 4; }
+            if s2 == 32 { shift_amt = 5; }
+            if s2 == 64 { shift_amt = 6; }
+            if s2 == 128 { shift_amt = 7; }
+            if s2 == 256 { shift_amt = 8; }
+
+            if shift_amt > 0 {
+                # Convert MUL v, 2^k -> SHL v, k
+                set_qword(addr, 0, 24); # SHL
+                set_qword(addr, 6, shift_amt); # imm = shift_amt
+                changed = changed + 1;
+            } else {
+                if s2 == 0 {
+                    # Convert MUL v, 0 -> CONST 0
+                    set_qword(addr, 0, 1); # CONST
+                    set_qword(addr, 2, 1); # IMM1
+                    set_qword(addr, 5, 0);
+                    set_qword(addr, 6, 0);
+                    changed = changed + 1;
+                }
+                if s2 == 1 {
+                    # Convert MUL v, 1 -> MOVE v
+                    set_qword(addr, 0, 2); # MOVE
+                    set_qword(addr, 2, fl & 1);
+                    set_qword(addr, 6, 0);
+                    changed = changed + 1;
+                }
+            }
+        }
+        if (op == 13) & (imm2 == 1) { # DIV by imm
+            if s2 == 1 {
+                set_qword(addr, 0, 2); # MOVE
+                set_qword(addr, 2, fl & 1);
+                set_qword(addr, 6, 0);
+                changed = changed + 1;
+            } else {
+                let k = -1;
+                if s2 == 2 { k = 1; }
+                if s2 == 4 { k = 2; }
+                if s2 == 8 { k = 3; }
+                if s2 == 16 { k = 4; }
+                if s2 == 32 { k = 5; }
+                if s2 == 64 { k = 6; }
+                if s2 == 128 { k = 7; }
+                if s2 == 256 { k = 8; }
+                if s2 == 512 { k = 9; }
+                if s2 == 1024 { k = 10; }
+                if k > 0 {
+                    set_qword(addr, 0, 25); # SHR
+                    set_qword(addr, 6, k);
+                    changed = changed + 1;
+                }
+            }
+        }
+        if (op == 14) & (imm2 == 1) { # MOD by imm
+            if s2 == 1 {
+                set_qword(addr, 0, 1); # CONST 0
+                set_qword(addr, 2, 1);
+                set_qword(addr, 5, 0);
+                set_qword(addr, 6, 0);
+                changed = changed + 1;
+            } else {
+                let mask = -1;
+                if s2 == 2 { mask = 1; }
+                if s2 == 4 { mask = 3; }
+                if s2 == 8 { mask = 7; }
+                if s2 == 16 { mask = 15; }
+                if s2 == 32 { mask = 31; }
+                if s2 == 64 { mask = 63; }
+                if s2 == 128 { mask = 127; }
+                if s2 == 256 { mask = 255; }
+                if s2 == 512 { mask = 511; }
+                if s2 == 1024 { mask = 1023; }
+                if mask > 0 {
+                    set_qword(addr, 0, 20); # AND
+                    set_qword(addr, 6, mask);
+                    changed = changed + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_copy_prop(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let changed = 0;
+    let i = 0;
+    while i < total {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let fl = get_qword(addr, 2);
+
+        if (op == 2) & ((fl & 1) == 0) { # v_dst = MOVE v_src1
+            let j = i + 1;
+            let stop = 0;
+            while (j < total) & (stop == 0) {
+                let j_addr = uir_node_addr(uir_buf, j);
+                let j_op = get_qword(j_addr, 0);
+                let j_dst = get_qword(j_addr, 4);
+                let j_s1 = get_qword(j_addr, 5);
+                let j_s2 = get_qword(j_addr, 6);
+                let j_fl = get_qword(j_addr, 2);
+
+                if (j_op == 50) | (j_op == 51) | (j_op == 53) | (j_op == 54) | (j_op == 55) | (j_op == 56) {
+                    stop = 1;
+                } else {
+                    if (j_op != 57) & (j_op != 58) {
+                        if j_dst == s1 { stop = 1; }
+                        if j_dst == dst { stop = 1; }
+                    }
+
+                    if j_op != 1 {
+                        if ((j_fl & 1) == 0) & (j_s1 == dst) {
+                            set_qword(j_addr, 5, s1);
+                            changed = changed + 1;
+                        }
+                        if ((j_fl & 2) == 0) & (j_s2 == dst) {
+                            set_qword(j_addr, 6, s1);
+                            changed = changed + 1;
+                        }
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_dce(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let use_counts = sys_mmap_page();
+    let changed = 0;
+    let ni = 0;
+    while ni < total {
+        let fn_addr = uir_node_addr(uir_buf, ni);
+        if get_qword(fn_addr, 0) == 50 { # UIR_FUNCTION_START
+            let fn_start = ni;
+            let fn_end = ni + 1;
+            while (fn_end < total) & (get_qword(uir_node_addr(uir_buf, fn_end), 0) != 51) {
+                fn_end = fn_end + 1;
+            }
+
+            # 1. Unreachable code elimination following UIR_RETURN
+            let ui = fn_start;
+            let in_unreach = 0;
+            while ui <= fn_end {
+                let uaddr = uir_node_addr(uir_buf, ui);
+                let uop = get_qword(uaddr, 0);
+                if uop == 57 { # UIR_RETURN
+                    in_unreach = 1;
+                } else {
+                    if (uop == 53) | (uop == 51) { # LABEL or FUNCTION_END
+                        in_unreach = 0;
+                    } else {
+                        if in_unreach == 1 {
+                            if uop != 0 {
+                                set_qword(uaddr, 0, 0); # NOP
+                                changed = changed + 1;
+                            }
+                        }
+                    }
+                }
+                ui = ui + 1;
+            }
+
+            # 2. Multi-round dead computation cascading
+            let dce_iter = 0;
+            let dce_cont = 1;
+            while (dce_iter < 4) & (dce_cont == 1) {
+                let dce_ch = 0;
+                let c_idx = 0;
+                while c_idx < 256 { set_qword(use_counts, c_idx, 0); c_idx = c_idx + 1; }
+
+                let i = fn_start;
+                while i <= fn_end {
+                    let addr = uir_node_addr(uir_buf, i);
+                    let op = get_qword(addr, 0);
+                    let s1 = get_qword(addr, 5);
+                    let s2 = get_qword(addr, 6);
+                    let fl = get_qword(addr, 2);
+                    let imm1 = fl & 1;
+                    let imm2 = (fl >> 1) & 1;
+
+                    if (op != 0) & (op != 1) & (op != 50) & (op != 51) & (op != 53) & (op != 54) {
+                        if op == 55 {
+                            if s1 < 250 { set_qword(use_counts, s1, get_qword(use_counts, s1) + 1); }
+                        } else {
+                            if (imm1 == 0) & (s1 >= 0) & (s1 < 250) {
+                                set_qword(use_counts, s1, get_qword(use_counts, s1) + 1);
+                            }
+                            if (imm2 == 0) & (s2 >= 0) & (s2 < 250) {
+                                set_qword(use_counts, s2, get_qword(use_counts, s2) + 1);
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+
+                i = fn_start;
+                while i <= fn_end {
+                    let addr = uir_node_addr(uir_buf, i);
+                    let op = get_qword(addr, 0);
+                    let dst = get_qword(addr, 4);
+                    let can_dce = 0;
+                    if (op == 1) | (op == 2) { can_dce = 1; }
+                    if (op >= 10) & (op <= 15) { can_dce = 1; }
+                    if (op >= 20) & (op <= 25) { can_dce = 1; }
+                    if (op >= 30) & (op <= 35) { can_dce = 1; }
+
+                    if can_dce == 1 {
+                        if dst < 250 {
+                            if get_qword(use_counts, dst) == 0 {
+                                set_qword(addr, 0, 0); # NOP
+                                dce_ch = dce_ch + 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                changed = changed + dce_ch;
+                if dce_ch == 0 { dce_cont = 0; }
+                dce_iter = dce_iter + 1;
+            }
+
+            ni = fn_end;
+        }
+        ni = ni + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_cse(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let cse_tbl = sys_mmap_page();
+    let cse_cnt = 0;
+    let changed = 0;
+    let i = 0;
+    while i < total {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let fl = get_qword(addr, 2);
+
+        if (op == 50) | (op == 51) | (op == 53) | (op == 54) | (op == 55) | (op == 56) {
+            cse_cnt = 0;
+        } else {
+            let is_pure_bin = 0;
+            if (op >= 10) & (op <= 14) { is_pure_bin = 1; }
+            if (op >= 20) & (op <= 25) { is_pure_bin = 1; }
+            if (op >= 30) & (op <= 35) { is_pure_bin = 1; }
+
+            if is_pure_bin == 1 {
+                let is_comm = 0;
+                if (op == 10) | (op == 12) | (op == 20) | (op == 21) | (op == 22) | (op == 30) | (op == 31) {
+                    is_comm = 1;
+                }
+                let norm_s1 = s1;
+                let norm_s2 = s2;
+                let norm_fl = fl;
+                if (is_comm == 1) & ((fl & 3) == 0) & (norm_s1 > norm_s2) {
+                    let tmp = norm_s1; norm_s1 = norm_s2; norm_s2 = tmp;
+                }
+
+                let match_idx = -1;
+                let ci = 0;
+                while ci < cse_cnt {
+                    let base = ci * 5;
+                    if (get_qword(cse_tbl, base + 0) == op) &
+                       (get_qword(cse_tbl, base + 1) == norm_s1) &
+                       (get_qword(cse_tbl, base + 2) == norm_s2) &
+                       (get_qword(cse_tbl, base + 3) == norm_fl) {
+                        match_idx = ci;
+                        ci = cse_cnt;
+                    }
+                    ci = ci + 1;
+                }
+
+                if match_idx >= 0 {
+                    let prev_dst = get_qword(cse_tbl, match_idx * 5 + 4);
+                    set_qword(addr, 0, 2); # MOVE
+                    set_qword(addr, 2, 0);
+                    set_qword(addr, 5, prev_dst);
+                    set_qword(addr, 6, 0);
+                    changed = changed + 1;
+                } else {
+                    if dst >= 0 {
+                        let k = 0;
+                        while k < cse_cnt {
+                            let kbase = k * 5;
+                            let es1 = get_qword(cse_tbl, kbase + 1);
+                            let es2 = get_qword(cse_tbl, kbase + 2);
+                            let edst = get_qword(cse_tbl, kbase + 4);
+                            let efl = get_qword(cse_tbl, kbase + 3);
+                            let inv = 0;
+                            if edst == dst { inv = 1; }
+                            if ((efl & 1) == 0) & (es1 == dst) { inv = 1; }
+                            if ((efl & 2) == 0) & (es2 == dst) { inv = 1; }
+                            if inv == 1 {
+                                set_qword(cse_tbl, kbase + 0, -1);
+                            }
+                            k = k + 1;
+                        }
+                    }
+
+                    if cse_cnt < 80 {
+                        let base = cse_cnt * 5;
+                        set_qword(cse_tbl, base + 0, op);
+                        set_qword(cse_tbl, base + 1, norm_s1);
+                        set_qword(cse_tbl, base + 2, norm_s2);
+                        set_qword(cse_tbl, base + 3, norm_fl);
+                        set_qword(cse_tbl, base + 4, dst);
+                        cse_cnt = cse_cnt + 1;
+                    }
+                }
+            } else {
+                if (op != 57) & (op != 58) & (dst >= 0) {
+                    let k = 0;
+                    while k < cse_cnt {
+                        let kbase = k * 5;
+                        let es1 = get_qword(cse_tbl, kbase + 1);
+                        let es2 = get_qword(cse_tbl, kbase + 2);
+                        let edst = get_qword(cse_tbl, kbase + 4);
+                        let efl = get_qword(cse_tbl, kbase + 3);
+                        let inv = 0;
+                        if edst == dst { inv = 1; }
+                        if ((efl & 1) == 0) & (es1 == dst) { inv = 1; }
+                        if ((efl & 2) == 0) & (es2 == dst) { inv = 1; }
+                        if inv == 1 {
+                            set_qword(cse_tbl, kbase + 0, -1);
+                        }
+                        k = k + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_branch_fold(uir_buf: i64): i64 {
+    let total = uir_get_count(uir_buf);
+    let const_map = sys_mmap_page();
+    let changed = 0;
+    let i = 0;
+    while i < total {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let fl = get_qword(addr, 2);
+
+        if (op == 50) | (op == 51) | (op == 53) | (op == 54) | (op == 55) {
+            let ci = 0;
+            while ci < 256 {
+                set_qword(const_map, ci * 2 + 0, 0);
+                ci = ci + 1;
+            }
+        }
+
+        if op == 1 {
+            if dst < 250 {
+                set_qword(const_map, dst * 2 + 0, 1);
+                set_qword(const_map, dst * 2 + 1, s1);
+            }
+        } else {
+            if (dst >= 0) & (dst < 250) {
+                if (op != 50) & (op != 51) & (op != 53) & (op != 54) & (op != 55) & (op != 57) & (op != 58) {
+                    set_qword(const_map, dst * 2 + 0, 0);
+                }
+            }
+        }
+
+        if op == 55 {
+            let is_const = fl & 1;
+            let val = s1;
+            if (is_const == 0) & (s1 < 250) {
+                if get_qword(const_map, s1 * 2 + 0) == 1 {
+                    is_const = 1;
+                    val = get_qword(const_map, s1 * 2 + 1);
+                }
+            }
+            if is_const == 1 {
+                set_qword(addr, 0, 54); # UIR_JUMP
+                set_qword(addr, 2, 0);
+                if val != 0 {
+                    set_qword(addr, 4, dst);
+                } else {
+                    set_qword(addr, 4, s2);
+                }
+                set_qword(addr, 5, 0);
+                set_qword(addr, 6, 0);
+                changed = changed + 1;
+            } else {
+                if dst == s2 {
+                    set_qword(addr, 0, 54);
+                    set_qword(addr, 2, 0);
+                    set_qword(addr, 4, dst);
+                    set_qword(addr, 5, 0);
+                    set_qword(addr, 6, 0);
+                    changed = changed + 1;
+                }
+            }
+        }
+
+        if op == 54 {
+            if i + 1 < total {
+                let next_addr = uir_node_addr(uir_buf, i + 1);
+                if (get_qword(next_addr, 0) == 53) & (get_qword(next_addr, 4) == dst) {
+                    set_qword(addr, 0, 0); # NOP
+                    changed = changed + 1;
+                }
+            }
+        }
+
+        # Redundant self move: MOVE v, v -> NOP
+        if (op == 2) & ((fl & 1) == 0) & (dst == s1) {
+            set_qword(addr, 0, 0); # NOP
+            changed = changed + 1;
+        }
+
+        i = i + 1;
+    }
+    return changed;
+}
+
+fn uir_opt_run_pipeline(uir_buf: i64): i64 {
+    let total_ch = 0;
+    let iter = 0;
+    let keep_going = 1;
+    while (iter < 5) & (keep_going == 1) {
+        let ch = 0;
+        ch = ch + uir_opt_copy_prop(uir_buf);
+        ch = ch + uir_opt_cse(uir_buf);
+        ch = ch + uir_opt_strength_reduce(uir_buf);
+        ch = ch + uir_opt_const_fold(uir_buf);
+        ch = ch + uir_opt_branch_fold(uir_buf);
+        ch = ch + uir_opt_dce(uir_buf);
+        total_ch = total_ch + ch;
+        if ch == 0 {
+            keep_going = 0;
+        }
+        iter = iter + 1;
+    }
+    return total_ch;
+}
+
+# ------------------------------------------------------------------------------
+# UIR Verifier (Invariant & Structural Correctness Validation Pass)
+# Invariants verified:
+#   1. Buffer bounded: 0 <= node_count <= 32768
+#   2. Well-nested functions: exactly one UIR_FUNCTION_END for each UIR_FUNCTION_START
+#   3. Opcode legality: all non-zero opcodes are within defined UIR opcode range (1..60)
+#   4. Parameter placement: UIR_PARAM must occur within active function scope
+#   5. Terminator semantics: UIR_RETURN must occur within active function scope
+# ------------------------------------------------------------------------------
+fn uir_verify_program(uir_buf: i64): i64 {
+    let count = get_qword(uir_buf, 0);
+    if count < 0 { return -1; }
+    if count > 32768 { return -2; }
+
+    let in_func = 0;
+    let i = 0;
+    while i < count {
+        let addr = uir_node_addr(uir_buf, i);
+        let op = get_qword(addr, 0);
+
+        if op != 0 {
+            if (op < 1) | (op > 60) {
+                return -20; # Illegal/corrupt opcode
+            }
+
+            if op == 50 { # UIR_FUNCTION_START
+                if in_func == 1 {
+                    return -10; # Nested function illegal
+                }
+                in_func = 1;
+            }
+
+            if op == 51 { # UIR_FUNCTION_END
+                if in_func == 0 {
+                    return -11; # FUNCTION_END without active FUNCTION_START
+                }
+                in_func = 0;
+            }
+
+            if op == 52 { # UIR_PARAM
+                if in_func == 0 {
+                    return -12; # Parameter outside function scope
+                }
+            }
+
+            if op == 57 { # UIR_RETURN
+                if in_func == 0 {
+                    return -13; # Return outside function scope
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if in_func == 1 {
+        return -14; # Unclosed function at end of UIR stream
+    }
+
+    return 0;
+}
+
+
+

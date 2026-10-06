@@ -1,0 +1,26 @@
+# ==============================================================================
+# Rubix Standard Library: Core Assertions & Utilities (std/core.bix)
+# Canonical assertions, identity, and fundamental primitives.
+# ==============================================================================
+
+fn identity(x: i64): i64 = x;
+
+fn assert_true(cond: bool): i64 {
+    if cond { return 0; }
+    return -1;
+}
+
+fn assert_false(cond: bool): i64 {
+    if cond == false { return 0; }
+    return -1;
+}
+
+fn assert_eq_int(actual: i64, expected: i64): i64 {
+    if actual == expected { return 0; }
+    return -1;
+}
+
+fn assert_eq_str(actual: str, expected: str): i64 {
+    if actual == expected { return 0; }
+    return -1;
+}

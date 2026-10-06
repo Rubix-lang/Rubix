@@ -1,0 +1,26 @@
+fn double(x: i64): i64 {
+    return x + x;
+}
+
+fn add(a: i64, b: i64): i64 {
+    return a + b;
+}
+
+fn twice(x: i64): i64 {
+    return add(x, x);
+}
+
+fn main(): i64 {
+    let r1 = twice(21);
+    if r1 != 42 { return 1; }
+
+    # Nested call expression with odd stack depth at inner call
+    let r2 = add(double(10), double(11));
+    if r2 != 42 { return 2; }
+
+    # Deep expression tree
+    let r3 = add(add(double(5), double(5)), add(double(5), double(6)));
+    if r3 != 42 { return 3; }
+
+    return 42;
+}

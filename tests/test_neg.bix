@@ -1,0 +1,7 @@
+fn main(): Integer {
+    let a = -100
+    print a
+    let b = 0 - 100
+    print b
+    0
+}

@@ -1,0 +1,361 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Fast Direct Interpreter
+# File: compiler/rex/rex_interp.bix
+#
+# Fast-startup, direct-threaded instruction interpreter for REX modules.
+# Optimized for development workflows, diagnostics, and debugging without
+# native code generation overhead.
+#
+# Invariant: Semantics and trap behavior are 100% identical to the compiled path.
+# ==============================================================================
+
+fn rex_interpret_module(buf: i64, len: i64): i64 {
+    # 1. Mandatory Pre-Execution Validation
+    let val_res = rex_validate_module(buf, len);
+    if val_res != REX_OK {
+        return val_res;
+    }
+
+    # 2. Decode Header and Sections
+    let hdr = sys_mmap_page();
+    rex_decode_header(buf, len, hdr);
+    let total_size = get_qword(hdr, 2);
+    let sec_cnt = get_qword(hdr, 3);
+
+    let sec_tbl = sys_mmap_page();
+    rex_locate_sections(buf, total_size, sec_cnt, sec_tbl);
+
+    # 3. Locate Main Export
+    let exp_off = get_qword(sec_tbl, REX_SEC_EXPORTS * 2 + 0);
+    let exp_cnt = rex_read_u32(buf, exp_off);
+    let ep = exp_off + 4;
+    let main_fidx = -1;
+    let ei = 0;
+    while ei < exp_cnt {
+        let h = rex_read_u64(buf, ep);
+        let fidx = rex_read_u32(buf, ep + 8);
+        ep = ep + 12;
+        if h == 6385467242 { main_fidx = fidx; }
+        ei = ei + 1;
+    }
+    if main_fidx < 0 {
+        return REX_ERR_NO_MAIN_EXPORT;
+    }
+
+    # 4. Function Table [type_idx, local_cnt, body_start, body_len]
+    let funcs_off = get_qword(sec_tbl, REX_SEC_FUNCTIONS * 2 + 0);
+    let func_cnt = rex_read_u32(buf, funcs_off);
+    let func_tbl = sys_mmap(0, 65536, 3, 34, -1, 0);
+
+    let code_off = get_qword(sec_tbl, REX_SEC_CODE * 2 + 0);
+    let cp = code_off + 4;
+
+    let fi = 0;
+    while fi < func_cnt {
+        let fp = funcs_off + 4 + (fi * 6);
+        let t_idx = rex_read_u32(buf, fp);
+        let l_cnt = rex_read_u16(buf, fp + 4);
+        let b_len = rex_read_u32(buf, cp);
+        cp = cp + 4;
+        set_qword(func_tbl, fi * 4 + 0, t_idx);
+        set_qword(func_tbl, fi * 4 + 1, l_cnt);
+        set_qword(func_tbl, fi * 4 + 2, cp);
+        set_qword(func_tbl, fi * 4 + 3, b_len);
+        cp = cp + b_len;
+        fi = fi + 1;
+    }
+
+    # 5. Initialize Linear Memory Space
+    let mem_size = 65536;
+    let mem_off = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 0);
+    let mem_len = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 1);
+    if mem_len >= 8 {
+        let req_init = rex_read_u32(buf, mem_off);
+        if req_init > mem_size { mem_size = req_init; }
+    }
+    let mem_buf = sys_mmap(0, mem_size, 3, 34, -1, 0);
+
+    let data_off = get_qword(sec_tbl, REX_SEC_DATA * 2 + 0);
+    let data_len = get_qword(sec_tbl, REX_SEC_DATA * 2 + 1);
+    if data_len > 4 {
+        let seg_cnt = rex_read_u32(buf, data_off);
+        let dp = data_off + 4;
+        let si = 0;
+        while si < seg_cnt {
+            let seg_offset = rex_read_u32(buf, dp);
+            let seg_bytes = rex_read_u32(buf, dp + 4);
+            dp = dp + 8;
+            let bi = 0;
+            while bi < seg_bytes {
+                set_byte(mem_buf, seg_offset + bi, get_byte(buf, dp + bi));
+                bi = bi + 1;
+            }
+            dp = dp + seg_bytes;
+            si = si + 1;
+        }
+    }
+
+    # 6. Activation Stack & Local Slots
+    let call_stack = sys_mmap(0, 65536, 3, 34, -1, 0);
+    let locals_arena = sys_mmap(0, 1048576, 3, 34, -1, 0);
+    let depth = 0;
+
+    let cur_fidx = main_fidx;
+    let cur_bstart = get_qword(func_tbl, cur_fidx * 4 + 2);
+    let cur_blen = get_qword(func_tbl, cur_fidx * 4 + 3);
+    let cur_pc = 0;
+    let cur_locals = locals_arena;
+
+    set_qword(call_stack, 0, cur_fidx);
+    set_qword(call_stack, 1, 0);
+    set_qword(call_stack, 2, cur_locals);
+    set_qword(call_stack, 3, -1);
+    set_qword(call_stack, 4, 0);
+
+    let running = 1;
+    let final_result = 0;
+    let steps = 0;
+
+    while (running == 1) & (steps < 20000000) {
+        steps = steps + 1;
+        if cur_pc >= cur_blen { return 0 - REX_TRAP_ILLEGAL_STATE; }
+
+        let ip = cur_bstart + cur_pc;
+        let op = rex_read_u8(buf, ip);
+
+        if op == REX_OP_CONST_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let val = rex_read_i64(buf, ip + 3);
+            set_qword(cur_locals, dst, val);
+            cur_pc = cur_pc + 11;
+        }
+        if op == REX_OP_CONST_I32 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let val = rex_read_i32(buf, ip + 3);
+            set_qword(cur_locals, dst, val);
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_MOVE {
+            let dst = rex_read_u16(buf, ip + 1);
+            let src = rex_read_u16(buf, ip + 3);
+            set_qword(cur_locals, dst, get_qword(cur_locals, src));
+            cur_pc = cur_pc + 5;
+        }
+        if op == REX_OP_ADD_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) + get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_SUB_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) - get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_MUL_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) * get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if (op == REX_OP_DIV_I64) | (op == REX_OP_MOD_I64) {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            let denom = get_qword(cur_locals, s2);
+            if denom == 0 { return 0 - REX_TRAP_DIV_BY_ZERO; }
+            if op == REX_OP_DIV_I64 {
+                set_qword(cur_locals, dst, get_qword(cur_locals, s1) / denom);
+            } else {
+                set_qword(cur_locals, dst, get_qword(cur_locals, s1) % denom);
+            }
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_NEG_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let src = rex_read_u16(buf, ip + 3);
+            set_qword(cur_locals, dst, 0 - get_qword(cur_locals, src));
+            cur_pc = cur_pc + 5;
+        }
+        if op == REX_OP_AND_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) & get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_OR_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) | get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_XOR_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) ^ get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_NOT_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let src = rex_read_u16(buf, ip + 3);
+            set_qword(cur_locals, dst, 0 - 1 - get_qword(cur_locals, src));
+            cur_pc = cur_pc + 5;
+        }
+        if op == REX_OP_SHL_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) << get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_SHR_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) >> get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
+        if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            let v1 = get_qword(cur_locals, s1);
+            let v2 = get_qword(cur_locals, s2);
+            let cmp_res = 0;
+            if op == REX_OP_CMP_EQ { if v1 == v2 { cmp_res = 1; } }
+            if op == REX_OP_CMP_NE { if v1 != v2 { cmp_res = 1; } }
+            if op == REX_OP_CMP_LT { if v1 < v2 { cmp_res = 1; } }
+            if op == REX_OP_CMP_LE { if v1 <= v2 { cmp_res = 1; } }
+            if op == REX_OP_CMP_GT { if v1 > v2 { cmp_res = 1; } }
+            if op == REX_OP_CMP_GE { if v1 >= v2 { cmp_res = 1; } }
+            set_qword(cur_locals, dst, cmp_res);
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_JUMP {
+            cur_pc = rex_read_u32(buf, ip + 1);
+        }
+        if op == REX_OP_BRANCH {
+            let cond = rex_read_u16(buf, ip + 1);
+            let tgt_t = rex_read_u32(buf, ip + 3);
+            let tgt_f = rex_read_u32(buf, ip + 7);
+            if get_qword(cur_locals, cond) != 0 {
+                cur_pc = tgt_t;
+            } else {
+                cur_pc = tgt_f;
+            }
+        }
+        if op == REX_OP_CALL {
+            let dst = rex_read_u16(buf, ip + 1);
+            let call_fidx = rex_read_u32(buf, ip + 3);
+            let arg_cnt = rex_read_u16(buf, ip + 7);
+            let next_pc = cur_pc + 9 + (arg_cnt * 2);
+
+            if depth >= 1023 { return 0 - REX_TRAP_STACK_OVERFLOW; }
+
+            let new_depth = depth + 1;
+            let new_locals = locals_arena + (new_depth * 1024);
+            let ai = 0;
+            while ai < arg_cnt {
+                let aslot = rex_read_u16(buf, ip + 9 + (ai * 2));
+                set_qword(new_locals, ai, get_qword(cur_locals, aslot));
+                ai = ai + 1;
+            }
+
+            set_qword(call_stack, depth * 5 + 0, cur_fidx);
+            set_qword(call_stack, depth * 5 + 1, cur_pc);
+            set_qword(call_stack, depth * 5 + 2, cur_locals);
+            set_qword(call_stack, depth * 5 + 3, dst);
+            set_qword(call_stack, depth * 5 + 4, next_pc);
+
+            depth = new_depth;
+            cur_fidx = call_fidx;
+            cur_bstart = get_qword(func_tbl, cur_fidx * 4 + 2);
+            cur_blen = get_qword(func_tbl, cur_fidx * 4 + 3);
+            cur_pc = 0;
+            cur_locals = new_locals;
+        }
+        if op == REX_OP_RETURN {
+            let rslot = rex_read_u16(buf, ip + 1);
+            let rval = 0;
+            if rslot != 65535 { rval = get_qword(cur_locals, rslot); }
+
+            if depth == 0 {
+                final_result = rval;
+                running = 0;
+            } else {
+                depth = depth - 1;
+                cur_fidx = get_qword(call_stack, depth * 5 + 0);
+                cur_locals = get_qword(call_stack, depth * 5 + 2);
+                let dst_slot = get_qword(call_stack, depth * 5 + 3);
+                let next_pc = get_qword(call_stack, depth * 5 + 4);
+                if dst_slot != 65535 { set_qword(cur_locals, dst_slot, rval); }
+                cur_bstart = get_qword(func_tbl, cur_fidx * 4 + 2);
+                cur_blen = get_qword(func_tbl, cur_fidx * 4 + 3);
+                cur_pc = next_pc;
+            }
+        }
+        if op == REX_OP_TRAP {
+            let tcode = rex_read_u16(buf, ip + 1);
+            return 0 - tcode;
+        }
+        if op == REX_OP_LOAD_64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let base = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 8 > mem_size) { return 0 - REX_TRAP_OUT_OF_BOUNDS; }
+            let b0 = get_byte(mem_buf, addr + 0);
+            let b1 = get_byte(mem_buf, addr + 1);
+            let b2 = get_byte(mem_buf, addr + 2);
+            let b3 = get_byte(mem_buf, addr + 3);
+            let b4 = get_byte(mem_buf, addr + 4);
+            let b5 = get_byte(mem_buf, addr + 5);
+            let b6 = get_byte(mem_buf, addr + 6);
+            let b7 = get_byte(mem_buf, addr + 7);
+            let val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+            set_qword(cur_locals, dst, val);
+            cur_pc = cur_pc + 9;
+        }
+        if op == REX_OP_STORE_64 {
+            let base = rex_read_u16(buf, ip + 1);
+            let val_slot = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 8 > mem_size) { return 0 - REX_TRAP_OUT_OF_BOUNDS; }
+            let val = get_qword(cur_locals, val_slot);
+            set_byte(mem_buf, addr + 0, val & 255);
+            set_byte(mem_buf, addr + 1, (val >> 8) & 255);
+            set_byte(mem_buf, addr + 2, (val >> 16) & 255);
+            set_byte(mem_buf, addr + 3, (val >> 24) & 255);
+            set_byte(mem_buf, addr + 4, (val >> 32) & 255);
+            set_byte(mem_buf, addr + 5, (val >> 40) & 255);
+            set_byte(mem_buf, addr + 6, (val >> 48) & 255);
+            set_byte(mem_buf, addr + 7, (val >> 56) & 255);
+            cur_pc = cur_pc + 9;
+        }
+        if op == REX_OP_ALLOC_MEM {
+            let dst = rex_read_u16(buf, ip + 1);
+            let sz = rex_read_u32(buf, ip + 3);
+            let p_alloc = get_qword(mem_buf, 0); # alloc ptr stored in low word
+            if p_alloc < 1024 { p_alloc = 1024; }
+            set_qword(cur_locals, dst, p_alloc);
+            set_qword(mem_buf, 0, p_alloc + sz);
+            cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_ADDR_LOCAL {
+            let dst = rex_read_u16(buf, ip + 1);
+            let off = rex_read_u32(buf, ip + 3);
+            set_qword(cur_locals, dst, off);
+            cur_pc = cur_pc + 7;
+        }
+    }
+
+    return final_result;
+}

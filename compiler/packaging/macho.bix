@@ -1,0 +1,136 @@
+# macho.bix - Mach-O executable and object writing
+# Emits 64-bit Mach-O headers and load commands for macOS targets.
+
+let MH_MAGIC_64 = 4277009103; # 0xFEEDFACF
+let CPU_TYPE_X86_64 = 16777223; # 0x01000007
+let CPU_TYPE_ARM64 = 16777228;  # 0x0100000C
+let CPU_SUBTYPE_ALL = 3;
+let MH_OBJECT = 1;
+
+let LC_SEGMENT_64 = 25;
+let LC_SYMTAB = 2;
+
+fn macho_set_u32(buf: i64, off: i64, val: i64): i64 {
+    set_byte(buf, off, val & 255);
+    set_byte(buf, off + 1, (val >> 8) & 255);
+    set_byte(buf, off + 2, (val >> 16) & 255);
+    set_byte(buf, off + 3, (val >> 24) & 255);
+    return 0;
+}
+
+fn macho_set_u64(buf: i64, off: i64, val: i64): i64 {
+    macho_set_u32(buf, off, val & 4294967295);
+    macho_set_u32(buf, off + 4, (val >> 32) & 4294967295);
+    return 0;
+}
+
+fn macho_write_object(out_path: i64, code_buf: i64, code_len: i64, target_id: i64): i64 {
+    let hdr_buf = sys_mmap_page();
+    let i = 0;
+    while i < 1024 {
+        set_byte(hdr_buf, i, 0);
+        i = i + 1;
+    }
+
+    # Mach-O 64-bit header (32 bytes)
+    macho_set_u32(hdr_buf, 0, MH_MAGIC_64);
+    let cputype = CPU_TYPE_X86_64;
+    if target_id == 2 {
+        cputype = CPU_TYPE_ARM64;
+    }
+    macho_set_u32(hdr_buf, 4, cputype);
+    macho_set_u32(hdr_buf, 8, CPU_SUBTYPE_ALL);
+    macho_set_u32(hdr_buf, 12, MH_OBJECT);
+    macho_set_u32(hdr_buf, 16, 2); # ncmds: LC_SEGMENT_64 + LC_SYMTAB
+
+    # LC_SEGMENT_64 (72 bytes) + 1 section header (80 bytes) = 152 bytes
+    # LC_SYMTAB (24 bytes). Total load command size = 176 bytes.
+    let sizeofcmds = 176;
+    macho_set_u32(hdr_buf, 20, sizeofcmds);
+    macho_set_u32(hdr_buf, 24, 0); # flags
+    macho_set_u32(hdr_buf, 28, 0); # reserved
+
+    # Command 1: LC_SEGMENT_64 (72 bytes at offset 32)
+    let cmd1_off = 32;
+    macho_set_u32(hdr_buf, cmd1_off + 0, LC_SEGMENT_64);
+    macho_set_u32(hdr_buf, cmd1_off + 4, 152); # cmdsize = 72 + 80
+    macho_set_u64(hdr_buf, cmd1_off + 24, 0);        # vmaddr
+    macho_set_u64(hdr_buf, cmd1_off + 32, code_len); # vmsize
+    let fileoff = 32 + sizeofcmds; # 208: code starts directly after headers
+    macho_set_u64(hdr_buf, cmd1_off + 40, fileoff);
+    macho_set_u64(hdr_buf, cmd1_off + 48, code_len); # filesize
+    macho_set_u32(hdr_buf, cmd1_off + 56, 7);        # maxprot: rwx
+    macho_set_u32(hdr_buf, cmd1_off + 60, 7);        # initprot: rwx
+    macho_set_u32(hdr_buf, cmd1_off + 64, 1);        # nsects = 1
+    macho_set_u32(hdr_buf, cmd1_off + 68, 0);
+
+    # Section 1: "__text" in "__TEXT" (80 bytes at offset 104)
+    let s1_off = cmd1_off + 72;
+    set_byte(hdr_buf, s1_off + 0, 95); set_byte(hdr_buf, s1_off + 1, 95); # "__"
+    set_byte(hdr_buf, s1_off + 2, 116); set_byte(hdr_buf, s1_off + 3, 101); # "te"
+    set_byte(hdr_buf, s1_off + 4, 120); set_byte(hdr_buf, s1_off + 5, 116); # "xt"
+
+    set_byte(hdr_buf, s1_off + 16, 95); set_byte(hdr_buf, s1_off + 17, 95); # "__"
+    set_byte(hdr_buf, s1_off + 18, 84); set_byte(hdr_buf, s1_off + 19, 69); # "TE"
+    set_byte(hdr_buf, s1_off + 20, 88); set_byte(hdr_buf, s1_off + 21, 84); # "XT"
+
+    macho_set_u64(hdr_buf, s1_off + 32, 0);        # addr = 0
+    macho_set_u64(hdr_buf, s1_off + 40, code_len); # size
+    macho_set_u32(hdr_buf, s1_off + 48, fileoff);  # file offset
+    macho_set_u32(hdr_buf, s1_off + 52, 4);        # 2^4 = 16 byte alignment
+    macho_set_u32(hdr_buf, s1_off + 56, 0);        # reloff
+    macho_set_u32(hdr_buf, s1_off + 60, 0);        # nreloc
+    # S_ATTR_SOME_INSTRUCTIONS | S_ATTR_PURE_INSTRUCTIONS (0x80000400)
+    macho_set_u32(hdr_buf, s1_off + 64, 2147484672);
+
+    # Command 2: LC_SYMTAB (24 bytes at offset 184)
+    let cmd2_off = s1_off + 80;
+    macho_set_u32(hdr_buf, cmd2_off + 0, LC_SYMTAB);
+    macho_set_u32(hdr_buf, cmd2_off + 4, 24);
+    let symtab_fileoff = fileoff + code_len;
+    macho_set_u32(hdr_buf, cmd2_off + 8, symtab_fileoff);
+    macho_set_u32(hdr_buf, cmd2_off + 12, 1); # 1 symbol: _main
+    let stroff = symtab_fileoff + 16;
+    macho_set_u32(hdr_buf, cmd2_off + 16, stroff);
+    macho_set_u32(hdr_buf, cmd2_off + 20, 16); # string table size
+
+    let out_fd = sys_open(out_path, 577, 493);
+    if out_fd < 0 {
+        sys_munmap(hdr_buf, 4096);
+        return -20;
+    }
+
+    # Write headers and load commands
+    sys_write_all(out_fd, hdr_buf, fileoff);
+    sys_munmap(hdr_buf, 4096);
+
+    # Write code bytes
+    sys_write_all(out_fd, code_buf, code_len);
+
+    # Write nlist_64 symbol table entry (16 bytes: _main)
+    let sym_buf = sys_mmap_page();
+    macho_set_u32(sym_buf, 0, 1); # n_strx: offset into string table
+    # N_SECT | N_EXT (0x0E | 0x01 = 0x0F)
+    set_byte(sym_buf, 4, 15);
+    set_byte(sym_buf, 5, 1);      # n_sect = 1 (__text)
+    set_byte(sym_buf, 6, 0);
+    macho_set_u64(sym_buf, 8, 0); # n_value: offset in section
+    sys_write_all(out_fd, sym_buf, 16);
+
+    # Write string table: "\0_main\0" padded to 16 bytes
+    let str_buf = sys_mmap_page();
+    let si = 0;
+    while si < 16 { set_byte(str_buf, si, 0); si = si + 1; }
+    set_byte(str_buf, 1, 95);  # '_'
+    set_byte(str_buf, 2, 109); # 'm'
+    set_byte(str_buf, 3, 97);  # 'a'
+    set_byte(str_buf, 4, 105); # 'i'
+    set_byte(str_buf, 5, 110); # 'n'
+    sys_write_all(out_fd, str_buf, 16);
+
+    sys_munmap(sym_buf, 4096);
+    sys_munmap(str_buf, 4096);
+    sys_close(out_fd);
+
+    return fileoff + code_len + 32;
+}

@@ -1,0 +1,187 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native Parser (rubix/rcs/parser.bix)
+# Recursive descent parser for .rcs stylesheets and inline [...] blocks.
+# ==============================================================================
+
+use rcs.ast;
+use rcs.tokens;
+use rcs.motion;
+
+# Extract string slice from source buffer using token offsets
+fn rcs_token_text(src: str, tok: *RcsToken): str {
+    return string_slice(src, tok.start_offset, tok.length);
+}
+
+# --- Parse an entire RCS file into rules ---
+fn rcs_parse(src: str, rules: *RcsRule, max_rules: i64): i64 {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let r_idx = 0;
+    let t_idx = 0;
+
+    while (t_idx < tok_count) & (r_idx < max_rules) {
+        # Skip semicolons at top level
+        if tokens[t_idx].kind == RcsTokenKind.Semicolon {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        # Collect full selector (handles pseudo-selectors like card.photo:hover, :root, classes, IDs)
+        let sel_start = tokens[t_idx].start_offset;
+        let sel_end = sel_start;
+        let has_when = false;
+
+        while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) & (has_when == false) {
+            let tok_str = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(tok_str, "when") {
+                has_when = true;
+            } else {
+                sel_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+        }
+
+        let sel_text = string_trim(string_slice(src, sel_start, sel_end - sel_start));
+        if string_length(sel_text) == 0 {
+            if t_idx < tok_count { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        # Collect state trigger condition if 'when' was found
+        let state_cond = "";
+        if has_when {
+            t_idx = t_idx + 1; # Skip 'when'
+            if t_idx < tok_count {
+                let cond_start = tokens[t_idx].start_offset;
+                let cond_end = cond_start;
+                while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                    cond_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                    t_idx = t_idx + 1;
+                }
+                state_cond = string_trim(string_slice(src, cond_start, cond_end - cond_start));
+            }
+        }
+
+        # Expect '{'
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+            t_idx = t_idx + 1; # Consume '{'
+
+            rules[r_idx].selector = sel_text;
+            rules[r_idx].state_condition = state_cond;
+            rules[r_idx].decl_count = 0;
+            rules[r_idx].motion_count = 0;
+
+            # Parse rule body until '}'
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let first_tok = rcs_token_text(src, &tokens[t_idx]);
+
+                # Layout helpers: center, row, col, grid
+                if str_eq(first_tok, "center") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+                if str_eq(first_tok, "row") | str_eq(first_tok, "col") | str_eq(first_tok, "grid") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Motion verbs: pop, slide, pulse, glow, etc.
+                if rcs_is_motion_verb(first_tok) {
+                    rules[r_idx].motion_count = rules[r_idx].motion_count + 1;
+                    # Consume motion statement until ';' or '}'
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # 3D helpers: tilt, depth
+                if str_eq(first_tok, "tilt") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+                if str_eq(first_tok, "depth") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Standard declaration: prop: val;
+                let prop_name = rcs_map_property(first_tok);
+                t_idx = t_idx + 1;
+
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                    t_idx = t_idx + 1; # Consume ':'
+                    # Consume value until ';' or '}'
+                    let val_str = "";
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        let v = rcs_token_text(src, &tokens[t_idx]);
+                        if string_length(val_str) > 0 {
+                            val_str = val_str + " " + v;
+                        } else {
+                            val_str = v;
+                        }
+                        t_idx = t_idx + 1;
+                    }
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                }
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.RBrace) {
+                t_idx = t_idx + 1; # Consume '}'
+            }
+
+            r_idx = r_idx + 1;
+        }
+    }
+
+    free_buffer(tokens as ptr, 32768);
+    return r_idx;
+}
+
+# --- Parse inline bracket syntax: [radius=12, pop on hover] ---
+fn rcs_parse_inline(inline_text: str, rule_out: *RcsRule): bool {
+    let clean = string_trim(inline_text);
+    let len = string_length(clean);
+    if len < 2 { return false; }
+
+    rule_out.selector = "__inline__";
+    rule_out.state_condition = "";
+    rule_out.decl_count = 0;
+    rule_out.motion_count = 0;
+
+    if string_contains(clean, "pop") | string_contains(clean, "slide") | string_contains(clean, "pulse") {
+        rule_out.motion_count = 1;
+    }
+    if string_contains(clean, "radius") | string_contains(clean, "bg") | string_contains(clean, "shadow") {
+        rule_out.decl_count = 1;
+    }
+
+    return true;
+}

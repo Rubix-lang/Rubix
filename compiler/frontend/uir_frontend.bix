@@ -1,0 +1,1178 @@
+# uir_frontend.bix - frontend parser lowering AST/tokens into Universal IR (UIR)
+
+
+fn uf_advance(s: i64): i64 {
+    let p = get_qword(s, 2);
+    let len = get_qword(s, 1);
+    let src = get_qword(s, 0);
+    let next_p = scan_token(src, p, len, s + 64);
+    set_qword(s, 2, next_p);
+    return get_qword(s + 64, 0);
+}
+
+fn uf_const_add(s: i64, hash: i64, val: i64): i64 {
+    let count = get_qword(s, 10);
+    if count >= 32 { return -1; }
+    let base = s + 512 + (count * 16);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, val);
+    set_qword(s, 10, count + 1);
+    return 0;
+}
+
+fn uf_const_find(s: i64, hash: i64): i64 {
+    let count = get_qword(s, 10);
+    let i = 0;
+    while i < count {
+        let base = s + 512 + (i * 16);
+        if get_qword(base, 0) == hash {
+            return get_qword(base, 1);
+        }
+        i = i + 1;
+    }
+    return -999999999;
+}
+
+fn uf_type_alias_add(s: i64, hash: i64, val: i64): i64 {
+    let count = get_qword(s, 11);
+    if count >= 32 { return -1; }
+    let base = s + 1024 + (count * 16);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, val);
+    set_qword(s, 11, count + 1);
+    return 0;
+}
+
+fn uf_type_alias_find(s: i64, hash: i64): i64 {
+    let count = get_qword(s, 11);
+    let i = 0;
+    while i < count {
+        let base = s + 1024 + (i * 16);
+        if get_qword(base, 0) == hash {
+            return get_qword(base, 1);
+        }
+        i = i + 1;
+    }
+    return -999999999;
+}
+
+
+fn uf_var_lookup(s: i64, name_hash: i64, is_add: i64, val: i64): i64 {
+    let count = get_qword(s, 7);
+    if is_add == 1 {
+        set_qword(s + 128, count * 2, name_hash);
+        set_qword(s + 128, count * 2 + 1, val);
+        set_qword(s, 7, count + 1);
+        return val;
+    }
+    let i = 0;
+    while i < count {
+        if get_qword(s + 128, i * 2) == name_hash {
+            return get_qword(s + 128, i * 2 + 1);
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn uf_enum_add(s: i64, e_hash: i64): i64 {
+    let eb = get_qword(s, 401);
+    if eb == 0 { return -1; }
+    let count = get_qword(eb, 0);
+    if count >= 16 { return -1; }
+    let base = eb + 16 + (count * 24);
+    let tot_v = get_qword(eb, 1);
+    set_qword(base, 0, e_hash);
+    set_qword(base, 1, tot_v); # start_v_idx
+    set_qword(base, 2, 0);     # v_count
+    set_qword(eb, 0, count + 1);
+    return count;
+}
+
+fn uf_enum_find(s: i64, e_hash: i64): i64 {
+    let eb = get_qword(s, 401);
+    if eb == 0 { return -1; }
+    let count = get_qword(eb, 0);
+    let i = 0;
+    while i < count {
+        let base = eb + 16 + (i * 24);
+        if get_qword(base, 0) == e_hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn uf_enum_add_variant(s: i64, enum_id: i64, v_hash: i64, disc_val: i64): i64 {
+    let eb = get_qword(s, 401);
+    if eb == 0 { return -1; }
+    let tot_v = get_qword(eb, 1);
+    if tot_v >= 120 { return -1; }
+    let v_base = eb + 512 + (tot_v * 24);
+    set_qword(v_base, 0, v_hash);
+    set_qword(v_base, 1, disc_val);
+    set_qword(v_base, 2, enum_id);
+    set_qword(eb, 1, tot_v + 1);
+    if enum_id >= 0 {
+        let e_base = eb + 16 + (enum_id * 24);
+        let vc = get_qword(e_base, 2);
+        set_qword(e_base, 2, vc + 1);
+    }
+    return tot_v;
+}
+
+fn uf_enum_find_variant(s: i64, enum_id: i64, v_hash: i64): i64 {
+    let eb = get_qword(s, 401);
+    if eb == 0 { return -999999999; }
+    if enum_id < 0 { return -999999999; }
+    let e_base = eb + 16 + (enum_id * 24);
+    let start_idx = get_qword(e_base, 1);
+    let vc = get_qword(e_base, 2);
+    let i = 0;
+    while i < vc {
+        let v_base = eb + 512 + ((start_idx + i) * 24);
+        if get_qword(v_base, 0) == v_hash {
+            return get_qword(v_base, 1);
+        }
+        i = i + 1;
+    }
+    return -999999999;
+}
+
+fn uf_enum_find_unscoped(s: i64, v_hash: i64): i64 {
+    let eb = get_qword(s, 401);
+    if eb == 0 { return -999999999; }
+    let tot_v = get_qword(eb, 1);
+    let i = 0;
+    while i < tot_v {
+        let v_base = eb + 512 + (i * 24);
+        if get_qword(v_base, 0) == v_hash {
+            return get_qword(v_base, 1);
+        }
+        i = i + 1;
+    }
+    return -999999999;
+}
+
+fn uf_parse_type(s: i64): i64 {
+    let tk = get_qword(s + 64, 0);
+    if (tk == TOKEN_AMP) | (tk == TOKEN_STAR) {
+        uf_advance(s);
+        tk = get_qword(s + 64, 0);
+    }
+    if tk == TOKEN_LPAREN {
+        uf_advance(s);
+        let depth = 1;
+        while (depth > 0) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+            let cur_k = get_qword(s + 64, 0);
+            if cur_k == TOKEN_LPAREN { depth = depth + 1; }
+            if cur_k == TOKEN_RPAREN { depth = depth - 1; }
+            uf_advance(s);
+        }
+        return 0;
+    }
+    if tk == TOKEN_LBRACKET {
+        uf_advance(s);
+        let bdepth = 1;
+        while (bdepth > 0) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+            let bk = get_qword(s + 64, 0);
+            if bk == TOKEN_LBRACKET { bdepth = bdepth + 1; }
+            if bk == TOKEN_RBRACKET { bdepth = bdepth - 1; }
+            uf_advance(s);
+        }
+        return 0;
+    }
+    if (tk == TOKEN_TYPE_I64) | ((tk >= 35) & (tk <= 39)) | (tk == 46) {
+        uf_advance(s);
+        return 0;
+    }
+    if tk == TOKEN_IDENT {
+        let ident_off = get_qword(s + 64, 2);
+        let ident_len = get_qword(s + 64, 3);
+        let ident_hash = hash_token(get_qword(s, 0), ident_off, ident_len);
+        let alias_t = uf_type_alias_find(s, ident_hash);
+        if alias_t != -999999999 {
+            uf_advance(s);
+            return 0;
+        }
+
+        uf_advance(s);
+        if get_qword(s + 64, 0) == TOKEN_LBRACKET {
+            uf_advance(s);
+            let bdepth = 1;
+            while (bdepth > 0) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                let bk = get_qword(s + 64, 0);
+                if bk == TOKEN_LBRACKET { bdepth = bdepth + 1; }
+                if bk == TOKEN_RBRACKET { bdepth = bdepth - 1; }
+                uf_advance(s);
+            }
+        }
+        return 0;
+    }
+    set_qword(s, 273, -1);
+    return -1;
+}
+
+fn uf_parse_tuple_literal(s: i64, first_elem: i64): i64 {
+    let uir_buf = get_qword(s, 3);
+    let tup_elems = sys_mmap_page();
+    set_qword(tup_elems, 0, first_elem);
+    let elem_cnt = 1;
+
+    while (get_qword(s + 64, 0) == TOKEN_COMMA) & (get_qword(s, 273) == 0) {
+        uf_advance(s); # consume ','
+        if get_qword(s + 64, 0) == TOKEN_RPAREN {
+            # Trailing comma, e.g. (e0,) or (e0, e1,)
+        } else {
+            let next_elem = uf_parse_expr(s, 1);
+            if next_elem < 0 {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            set_qword(tup_elems, elem_cnt, next_elem);
+            elem_cnt = elem_cnt + 1;
+        }
+    }
+
+    if get_qword(s + 64, 0) == TOKEN_RPAREN {
+        uf_advance(s); # consume ')'
+    } else {
+        set_qword(s, 273, -1);
+        return -1;
+    }
+
+    let cur_v = get_qword(s, 4);
+    let base_slot = cur_v + elem_cnt - 1;
+    set_qword(s, 4, cur_v + elem_cnt);
+
+    uir_emit(uir_buf, 40, TYPE_I64, 0, 0, 0, elem_cnt * 8, 0, 0); # ALLOC_STACK
+
+    let tup_ptr = get_qword(s, 4);
+    set_qword(s, 4, tup_ptr + 1);
+    uir_emit(uir_buf, 41, TYPE_PTR, 1, 0, tup_ptr, base_slot, 0, 0); # ADDR_OF
+
+    let ei = 0;
+    while ei < elem_cnt {
+        let ev = get_qword(tup_elems, ei);
+        uir_emit(uir_buf, 43, TYPE_I64, 0, 0, 0, tup_ptr, ev, ei * 8); # UIR_STORE
+        ei = ei + 1;
+    }
+
+    return tup_ptr;
+}
+
+fn uf_parse_expr(s: i64, min_prec: i64): i64 {
+    let uir_buf = get_qword(s, 3);
+    let k = get_qword(s + 64, 0);
+    let left = -1;
+
+    # Unary minus: 0 - rhs
+    if k == TOKEN_MINUS {
+        uf_advance(s);
+        let rhs = uf_parse_expr(s, 8);
+        if rhs < 0 {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        let z_v = get_qword(s, 4); set_qword(s, 4, z_v + 1);
+        uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, z_v, 0, 0, 0);
+        let neg_v = get_qword(s, 4); set_qword(s, 4, neg_v + 1);
+        uir_emit(uir_buf, UIR_SUB, TYPE_I64, 0, 0, neg_v, z_v, rhs, 0);
+        left = neg_v;
+    } else {
+        # Unary bitwise NOT (~): rhs ^ -1
+        if k == TOKEN_TILDE {
+            uf_advance(s);
+            let rhs = uf_parse_expr(s, 8);
+            if rhs < 0 {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            let m1_v = get_qword(s, 4); set_qword(s, 4, m1_v + 1);
+            uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, m1_v, -1, 0, 0);
+            let not_v = get_qword(s, 4); set_qword(s, 4, not_v + 1);
+            uir_emit(uir_buf, 22, TYPE_I64, 0, 0, not_v, rhs, m1_v, 0); # XOR
+            left = not_v;
+        } else {
+            # Primary expression: integer, float, string, char, or bool literal
+            if (k == TOKEN_INT_LIT) | (k == TOKEN_FLOAT_LIT) | (k == TOKEN_STR_LIT) | (k == TOKEN_CHAR_LIT) | (k == 40) | (k == 41) {
+                let val = get_qword(s + 64, 1);
+                let lit_t = TYPE_I64;
+                if k == TOKEN_FLOAT_LIT { lit_t = TYPE_F64; }
+                if k == TOKEN_STR_LIT {
+                    lit_t = TYPE_STR;
+                    val = get_qword(s + 64, 2); # string offset
+                }
+                if k == TOKEN_CHAR_LIT { lit_t = TYPE_U8; }
+                if k == 40 { val = 1; } # true
+                if k == 41 { val = 0; } # false
+                uf_advance(s);
+                let v = get_qword(s, 4);
+                set_qword(s, 4, v + 1);
+                uir_emit(uir_buf, UIR_CONST, lit_t, 1, 0, v, val, 0, 0);
+                left = v;
+            } else {
+                if k == TOKEN_IDENT {
+                    let src = get_qword(s, 0);
+                    let off = get_qword(s + 64, 2);
+                    let tlen = get_qword(s + 64, 3);
+                    let h = hash_token(src, off, tlen);
+                    uf_advance(s);
+                    if get_qword(s + 64, 0) == TOKEN_DOT {
+                        let enum_id = uf_enum_find(s, h);
+                        if enum_id >= 0 {
+                            uf_advance(s); # skip '.'
+                            if get_qword(s + 64, 0) == TOKEN_IDENT {
+                                let v_off = get_qword(s + 64, 2);
+                                let v_len = get_qword(s + 64, 3);
+                                let v_hash = hash_token(src, v_off, v_len);
+                                uf_advance(s); # skip variant
+                                let cval = uf_enum_find_variant(s, enum_id, v_hash);
+                                if cval != -999999999 {
+                                    let v = get_qword(s, 4);
+                                    set_qword(s, 4, v + 1);
+                                    uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, v, cval, 0, 0);
+                                    left = v;
+                                } else {
+                                    set_qword(s, 273, -1);
+                                    return -1;
+                                }
+                            } else {
+                                set_qword(s, 273, -1);
+                                return -1;
+                            }
+                        } else {
+                            let vreg = uf_var_lookup(s, h, 0, 0);
+                            if vreg >= 0 {
+                                left = vreg;
+                            } else {
+                                set_qword(s, 273, -1);
+                                return -1;
+                            }
+                        }
+                    } else {
+                        if get_qword(s + 64, 0) == TOKEN_LPAREN {
+                            # Function call
+                            uf_advance(s);
+                            let arg_count = 0;
+                            let args_buf = sys_mmap_page();
+                            while (get_qword(s + 64, 0) != TOKEN_RPAREN) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                                let av = uf_parse_expr(s, 1);
+                                if av < 0 {
+                                    set_qword(s, 273, -1);
+                                    return -1;
+                                }
+                                set_qword(args_buf, arg_count, av);
+                                arg_count = arg_count + 1;
+                                if get_qword(s + 64, 0) == TOKEN_COMMA { uf_advance(s); }
+                            }
+                            if get_qword(s + 64, 0) == TOKEN_RPAREN {
+                                uf_advance(s);
+                            } else {
+                                set_qword(s, 273, -1);
+                                return -1;
+                            }
+                            let max_args = 16;
+                            if get_qword(s, 400) == 1 { max_args = 6; }
+                            if arg_count > max_args {
+                                set_qword(s, 273, -1);
+                                return -1;
+                            }
+                            let fc_check = get_qword(s, 8);
+                            let fi_check = 0;
+                            while fi_check < fc_check {
+                                if get_qword(s + 2048, fi_check * 2 + 0) == h {
+                                    let exp_params = get_qword(s + 2048, fi_check * 2 + 1);
+                                    if arg_count != exp_params {
+                                        set_qword(s, 273, -1); # Param count mismatch -> fallback for -35
+                                        return -1;
+                                    }
+                                }
+                                fi_check = fi_check + 1;
+                            }
+                            let ai = 0;
+                            while ai < arg_count {
+                                uir_emit(uir_buf, 58, TYPE_I64, 0, 0, ai, get_qword(args_buf, ai), 0, 0);
+                                ai = ai + 1;
+                            }
+                            let call_dst = get_qword(s, 4);
+                            set_qword(s, 4, call_dst + 1);
+                            uir_emit(uir_buf, UIR_CALL, TYPE_I64, 0, 0, call_dst, h, arg_count, 0);
+                            left = call_dst;
+                        } else {
+                            let vreg = uf_var_lookup(s, h, 0, 0);
+                            if vreg >= 0 {
+                                left = vreg;
+                            } else {
+                                let const_val = uf_const_find(s, h);
+                                if const_val != -999999999 {
+                                    let v = get_qword(s, 4);
+                                    set_qword(s, 4, v + 1);
+                                    uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, v, const_val, 0, 0);
+                                    left = v;
+                                } else {
+                                    let unc_val = uf_enum_find_unscoped(s, h);
+                                    if unc_val != -999999999 {
+                                        let v = get_qword(s, 4);
+                                        set_qword(s, 4, v + 1);
+                                        uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, v, unc_val, 0, 0);
+                                        left = v;
+                                    } else {
+                                        set_qword(s, 273, -1);
+                                        return -1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if k == TOKEN_LPAREN {
+                        uf_advance(s);
+                        if get_qword(s + 64, 0) == TOKEN_RPAREN {
+                            uf_advance(s);
+                            let unit_v = get_qword(s, 4); set_qword(s, 4, unit_v + 1);
+                            uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, unit_v, 0, 0, 0);
+                            left = unit_v;
+                        } else {
+                            left = uf_parse_expr(s, 1);
+                            if get_qword(s + 64, 0) == TOKEN_COMMA {
+                                left = uf_parse_tuple_literal(s, left);
+                            } else {
+                                if get_qword(s + 64, 0) == TOKEN_RPAREN {
+                                    uf_advance(s);
+                                } else {
+                                    set_qword(s, 273, -1);
+                                    return -1;
+                                }
+                            }
+                        }
+                    } else {
+                        set_qword(s, 273, -1);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+
+    if left < 0 {
+        set_qword(s, 273, -1);
+        return -1;
+    }
+
+    # Postfix operators (tuple indexing: left.0, left.1)
+    let has_postfix = 1;
+    while (has_postfix == 1) & (get_qword(s, 273) == 0) {
+        let pk = get_qword(s + 64, 0);
+        if pk == TOKEN_DOT {
+            let p_pos = get_qword(s, 2);
+            let p_len = get_qword(s, 1);
+            let p_src = get_qword(s, 0);
+            scan_token(p_src, p_pos, p_len, s + 96);
+            if get_qword(s + 96, 0) == TOKEN_INT_LIT {
+                uf_advance(s); # consume '.'
+                let f_idx = get_qword(s + 64, 1);
+                uf_advance(s); # consume int lit
+                let loaded_v = get_qword(s, 4);
+                set_qword(s, 4, loaded_v + 1);
+                uir_emit(uir_buf, UIR_LOAD, TYPE_I64, 0, 0, loaded_v, left, 0, f_idx * 8);
+                left = loaded_v;
+            } else {
+                has_postfix = 0;
+            }
+        } else {
+            if pk == TOKEN_LBRACKET {
+                uf_advance(s);
+                let idx_v = uf_parse_expr(s, 1);
+                if get_qword(s + 64, 0) == TOKEN_RBRACKET {
+                    uf_advance(s);
+                    let loaded_v = get_qword(s, 4);
+                    set_qword(s, 4, loaded_v + 1);
+                    uir_emit(uir_buf, UIR_LOAD, TYPE_I64, 0, 0, loaded_v, left, idx_v, 0);
+                    left = loaded_v;
+                } else {
+                    has_postfix = 0;
+                }
+            } else {
+                has_postfix = 0;
+            }
+        }
+    }
+
+    # Binary operators with precedence climbing
+    let running = 1;
+    while (running == 1) & (get_qword(s, 273) == 0) {
+        let cur_k = get_qword(s + 64, 0);
+        if (cur_k == TOKEN_PLUS_TRAP) | (cur_k == TOKEN_PLUS_SAT) | (cur_k == TOKEN_MINUS_TRAP) | (cur_k == TOKEN_MINUS_SAT) | (cur_k == TOKEN_STAR_TRAP) | (cur_k == TOKEN_STAR_SAT) {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        let uir_op = 0;
+        let op_prec = 0;
+        if cur_k == TOKEN_EQUAL_EQUAL { uir_op = 30; op_prec = 1; }
+        if cur_k == TOKEN_NOT_EQUAL { uir_op = 31; op_prec = 1; }
+        if cur_k == TOKEN_LESS { uir_op = 32; op_prec = 1; }
+        if cur_k == TOKEN_LESS_EQ { uir_op = 33; op_prec = 1; }
+        if cur_k == TOKEN_GREATER { uir_op = 34; op_prec = 1; }
+        if cur_k == TOKEN_GREATER_EQ { uir_op = 35; op_prec = 1; }
+        if cur_k == TOKEN_PIPE { uir_op = 21; op_prec = 2; }
+        if cur_k == TOKEN_CARET { uir_op = 22; op_prec = 3; }
+        if cur_k == TOKEN_AMP { uir_op = 20; op_prec = 4; }
+        if cur_k == TOKEN_SHL { uir_op = 24; op_prec = 5; }
+        if cur_k == TOKEN_SHR { uir_op = 25; op_prec = 5; }
+        if cur_k == TOKEN_PLUS { uir_op = UIR_ADD; op_prec = 6; }
+        if cur_k == TOKEN_MINUS { uir_op = UIR_SUB; op_prec = 6; }
+        if cur_k == TOKEN_STAR { uir_op = UIR_MUL; op_prec = 7; }
+        if cur_k == TOKEN_SLASH { uir_op = UIR_DIV; op_prec = 7; }
+        if cur_k == TOKEN_PERCENT { uir_op = 14; op_prec = 7; }
+
+        if (uir_op > 0) & (op_prec >= min_prec) {
+            uf_advance(s);
+            # Save node count before parsing RHS so we can detect a single CONST
+            let pre_count = uir_get_count(uir_buf);
+            let right = uf_parse_expr(s, op_prec + 1);
+            if right < 0 {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            let dst = get_qword(s, 4);
+            set_qword(s, 4, dst + 1);
+            # Detect RHS = single UIR_CONST node → promote to inline imm2
+            let post_count = uir_get_count(uir_buf);
+            let emit_flags = 0;
+            let emit_s2 = right;
+            if post_count == pre_count + 1 {
+                let last_addr = uir_node_addr(uir_buf, post_count - 1);
+                # Check: last emitted node is CONST (op=1) with dst==right
+                if (get_qword(last_addr, 0) == 1) & (get_qword(last_addr, 4) == right) {
+                    emit_flags = 2;              # imm2 bit
+                    emit_s2 = get_qword(last_addr, 5); # src1 = const value
+                    set_qword(last_addr, 0, 0);  # NOP: const no longer needed as vreg
+                }
+            }
+            uir_emit(uir_buf, uir_op, TYPE_I64, emit_flags, 0, dst, left, emit_s2, 0);
+            left = dst;
+        } else {
+            running = 0;
+        }
+    }
+    return left;
+}
+
+fn uf_parse_let_tuple_destruct(s: i64): i64 {
+    let uir_buf = get_qword(s, 3);
+    uf_advance(s); # consume '('
+    let d_buf = sys_mmap_page();
+    let d_cnt = 0;
+    while (get_qword(s + 64, 0) != TOKEN_RPAREN) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+        if get_qword(s + 64, 0) != TOKEN_IDENT {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        let src = get_qword(s, 0);
+        let off = get_qword(s + 64, 2);
+        let tlen = get_qword(s + 64, 3);
+        let v_name = hash_token(src, off, tlen);
+        set_qword(d_buf, d_cnt, v_name);
+        d_cnt = d_cnt + 1;
+        uf_advance(s); # consume ident
+        if get_qword(s + 64, 0) == TOKEN_COMMA { uf_advance(s); }
+    }
+    if get_qword(s + 64, 0) != TOKEN_RPAREN {
+        set_qword(s, 273, -1);
+        return -1;
+    }
+    uf_advance(s); # consume ')'
+
+    if get_qword(s + 64, 0) == TOKEN_COLON {
+        uf_advance(s);
+        uf_parse_type(s);
+        if get_qword(s, 273) < 0 { return -1; }
+    }
+
+    if get_qword(s + 64, 0) != TOKEN_EQUAL {
+        set_qword(s, 273, -1);
+        return -1;
+    }
+    uf_advance(s); # consume '='
+
+    let tup_rhs_vreg = uf_parse_expr(s, 1);
+    if tup_rhs_vreg < 0 {
+        set_qword(s, 273, -1);
+        return -1;
+    }
+
+    let di = 0;
+    while di < d_cnt {
+        let elem_vreg = get_qword(s, 4); set_qword(s, 4, elem_vreg + 1);
+        uir_emit(uir_buf, UIR_LOAD, TYPE_I64, 0, 0, elem_vreg, tup_rhs_vreg, 0, di * 8);
+        let var_vreg = get_qword(s, 4); set_qword(s, 4, var_vreg + 1);
+        uir_emit(uir_buf, UIR_MOVE, TYPE_I64, 0, 0, var_vreg, elem_vreg, 0, 0);
+        uf_var_lookup(s, get_qword(d_buf, di), 1, var_vreg);
+        di = di + 1;
+    }
+
+    if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+        uf_advance(s);
+        return 0;
+    }
+    set_qword(s, 273, -1);
+    return -1;
+}
+
+fn uf_parse_stmt(s: i64): i64 {
+    let uir_buf = get_qword(s, 3);
+    let k = get_qword(s + 64, 0);
+
+    # 1. let <ident> [: type] = <expr>; or mut <ident> [: type] = <expr>; or let (a, b) = <expr>;
+    if (k == TOKEN_KW_LET) | (k == TOKEN_KW_MUT) {
+        uf_advance(s);
+        if get_qword(s + 64, 0) == TOKEN_LPAREN {
+            return uf_parse_let_tuple_destruct(s);
+        }
+        if get_qword(s + 64, 0) != TOKEN_IDENT {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        let src = get_qword(s, 0);
+        let off = get_qword(s + 64, 2);
+        let tlen = get_qword(s + 64, 3);
+        let var_name = hash_token(src, off, tlen);
+        uf_advance(s);
+        if get_qword(s + 64, 0) == TOKEN_COLON {
+            uf_advance(s);
+            uf_parse_type(s);
+            if get_qword(s, 273) < 0 { return -1; }
+        }
+        if get_qword(s + 64, 0) == TOKEN_EQUAL {
+            uf_advance(s);
+            let val_vreg = uf_parse_expr(s, 1);
+            if val_vreg < 0 {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            let var_vreg = get_qword(s, 4);
+            set_qword(s, 4, var_vreg + 1);
+            uir_emit(uir_buf, UIR_MOVE, TYPE_I64, 0, 0, var_vreg, val_vreg, 0, 0);
+            uf_var_lookup(s, var_name, 1, var_vreg);
+        } else {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+            uf_advance(s);
+        }
+        return 0;
+    }
+
+    # 2. return [<expr>];
+    if k == TOKEN_KW_RETURN {
+        uf_advance(s);
+        if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+            if get_qword(s, 6) == 1 {
+                # Empty return in non-void function -> fallback for -41
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            uf_advance(s);
+            uir_emit(uir_buf, UIR_RETURN, TYPE_I64, 0, 0, -1, -1, 0, 0);
+            return 0;
+        }
+        let ret_vreg = uf_parse_expr(s, 1);
+        if ret_vreg < 0 {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uir_emit(uir_buf, UIR_RETURN, TYPE_I64, 0, 0, -1, ret_vreg, 0, 0);
+        if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+            uf_advance(s);
+        }
+        return 0;
+    }
+
+    # 3. while <cond> { ... }
+    if k == TOKEN_KW_WHILE {
+        uf_advance(s);
+        let loop_lbl = get_qword(s, 5); set_qword(s, 5, loop_lbl + 1);
+        let body_lbl = get_qword(s, 5); set_qword(s, 5, body_lbl + 1);
+        let end_lbl = get_qword(s, 5); set_qword(s, 5, end_lbl + 1);
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, loop_lbl, 0, 0, 0);
+        let cond_vreg = uf_parse_expr(s, 1);
+        if cond_vreg < 0 {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uir_emit(uir_buf, UIR_BRANCH, TYPE_I64, 0, 0, body_lbl, cond_vreg, end_lbl, 0);
+        if get_qword(s + 64, 0) != TOKEN_LBRACE {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uf_advance(s);
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, body_lbl, 0, 0, 0);
+        while (get_qword(s + 64, 0) != TOKEN_RBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+            uf_parse_stmt(s);
+        }
+        if get_qword(s + 64, 0) != TOKEN_RBRACE {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uf_advance(s);
+        let loop_cnt = uir_get_count(uir_buf);
+        let emit_loop_jump = 1;
+        while loop_cnt > 0 {
+            let last_addr = uir_node_addr(uir_buf, loop_cnt - 1);
+            let last_op = get_qword(last_addr, 0);
+            if last_op == 0 {
+                loop_cnt = loop_cnt - 1;
+            } else {
+                if last_op == UIR_RETURN {
+                    emit_loop_jump = 0;
+                }
+                loop_cnt = 0;
+            }
+        }
+        if emit_loop_jump == 1 {
+            uir_emit(uir_buf, UIR_JUMP, TYPE_I64, 0, 0, loop_lbl, 0, 0, 0);
+        }
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, end_lbl, 0, 0, 0);
+        return 0;
+    }
+
+    # 4. if <cond> { ... } else { ... }
+    if k == TOKEN_KW_IF {
+        uf_advance(s);
+        let cond_vreg = uf_parse_expr(s, 1);
+        if cond_vreg < 0 {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        let then_lbl = get_qword(s, 5); set_qword(s, 5, then_lbl + 1);
+        let else_lbl = get_qword(s, 5); set_qword(s, 5, else_lbl + 1);
+        let end_lbl = get_qword(s, 5); set_qword(s, 5, end_lbl + 1);
+        uir_emit(uir_buf, UIR_BRANCH, TYPE_I64, 0, 0, then_lbl, cond_vreg, else_lbl, 0);
+        if get_qword(s + 64, 0) != TOKEN_LBRACE {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uf_advance(s);
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, then_lbl, 0, 0, 0);
+        while (get_qword(s + 64, 0) != TOKEN_RBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+            uf_parse_stmt(s);
+        }
+        if get_qword(s + 64, 0) != TOKEN_RBRACE {
+            set_qword(s, 273, -1);
+            return -1;
+        }
+        uf_advance(s);
+        let then_cnt = uir_get_count(uir_buf);
+        let emit_jump = 1;
+        while then_cnt > 0 {
+            let last_addr = uir_node_addr(uir_buf, then_cnt - 1);
+            let last_op = get_qword(last_addr, 0);
+            if last_op == 0 {
+                then_cnt = then_cnt - 1;
+            } else {
+                if last_op == UIR_RETURN {
+                    emit_jump = 0;
+                }
+                then_cnt = 0;
+            }
+        }
+        if emit_jump == 1 {
+            uir_emit(uir_buf, UIR_JUMP, TYPE_I64, 0, 0, end_lbl, 0, 0, 0);
+        }
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, else_lbl, 0, 0, 0);
+        if get_qword(s + 64, 0) == TOKEN_KW_ELSE {
+            uf_advance(s);
+            if get_qword(s + 64, 0) == TOKEN_KW_IF {
+                uf_parse_stmt(s);
+            } else {
+                if get_qword(s + 64, 0) != TOKEN_LBRACE {
+                    set_qword(s, 273, -1);
+                    return -1;
+                }
+                uf_advance(s);
+                while (get_qword(s + 64, 0) != TOKEN_RBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                    uf_parse_stmt(s);
+                }
+                if get_qword(s + 64, 0) != TOKEN_RBRACE {
+                    set_qword(s, 273, -1);
+                    return -1;
+                }
+                uf_advance(s);
+            }
+        }
+        uir_emit(uir_buf, UIR_LABEL, TYPE_I64, 0, 0, end_lbl, 0, 0, 0);
+        return 0;
+    }
+
+    # 5. <var> = <expr>; or <call>; or print/println; or expr
+    if k == TOKEN_IDENT {
+        let src = get_qword(s, 0);
+        let off = get_qword(s + 64, 2);
+        let tlen = get_qword(s + 64, 3);
+        let var_name = hash_token(src, off, tlen);
+
+        # Check for print / println statement: print <expr>;
+        if (var_name == 210724587794) | (var_name == 229479076111340) {
+            uf_advance(s);
+            let arg_v = uf_parse_expr(s, 1);
+            if arg_v >= 0 {
+                uir_emit(uir_buf, 58, TYPE_I64, 0, 0, 0, arg_v, 0, 0);
+                let call_dst = get_qword(s, 4);
+                set_qword(s, 4, call_dst + 1);
+                uir_emit(uir_buf, UIR_CALL, TYPE_I64, 0, 0, call_dst, var_name, 1, 0);
+                if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+                    uf_advance(s);
+                }
+                return 0;
+            }
+            set_qword(s, 273, -1);
+            return -1;
+        }
+
+        uf_advance(s);
+        if get_qword(s + 64, 0) == TOKEN_EQUAL {
+            uf_advance(s);
+            let val_vreg = uf_parse_expr(s, 1);
+            if val_vreg < 0 {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            let target_vreg = uf_var_lookup(s, var_name, 0, 0);
+            if target_vreg >= 0 {
+                uir_emit(uir_buf, UIR_MOVE, TYPE_I64, 0, 0, target_vreg, val_vreg, 0, 0);
+            } else {
+                set_qword(s, 273, -1);
+                return -1;
+            }
+            if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+                uf_advance(s);
+            }
+            return 0;
+        }
+
+        # Expression starting with identifier (e.g. call, a + b, fib(n - 1) + fib(n - 2))
+        set_qword(s, 2, off);
+        uf_advance(s);
+        let expr_v = uf_parse_expr(s, 1);
+        if expr_v >= 0 {
+            if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+                uf_advance(s);
+            }
+            if get_qword(s + 64, 0) == TOKEN_RBRACE {
+                uir_emit(uir_buf, UIR_RETURN, TYPE_I64, 0, 0, -1, expr_v, 0, 0);
+            }
+            return 0;
+        }
+        set_qword(s, 273, -1);
+        return -1;
+    }
+
+    # 6. Literal expression statement (e.g. 0 at end of main)
+    if (k != TOKEN_RBRACE) & (k != TOKEN_EOF) {
+        let expr_v = uf_parse_expr(s, 1);
+        if expr_v >= 0 {
+            if get_qword(s + 64, 0) == TOKEN_SEMICOLON {
+                uf_advance(s);
+            }
+            if get_qword(s + 64, 0) == TOKEN_RBRACE {
+                uir_emit(uir_buf, UIR_RETURN, TYPE_I64, 0, 0, -1, expr_v, 0, 0);
+            }
+            return 0;
+        }
+    }
+
+    # 7. for loop
+    if k == 55 {
+        uf_advance(s);
+        while (get_qword(s + 64, 0) != TOKEN_LBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+            uf_advance(s);
+        }
+        if get_qword(s + 64, 0) == TOKEN_LBRACE {
+            uf_advance(s);
+            while (get_qword(s + 64, 0) != TOKEN_RBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                uf_parse_stmt(s);
+            }
+            if get_qword(s + 64, 0) == TOKEN_RBRACE {
+                uf_advance(s);
+                return 0;
+            }
+        }
+        set_qword(s, 273, -1);
+        return -1;
+    }
+
+    # Any other statement type is unsupported in simple UIR frontend -> trigger fallback
+    set_qword(s, 273, -1);
+    return -1;
+}
+
+fn uir_frontend_parse(src: i64, src_len: i64, uir_buf: i64): i64 {
+    return uir_frontend_parse_target(src, src_len, uir_buf, 1);
+}
+
+fn uir_frontend_parse_target(src: i64, src_len: i64, uir_buf: i64, target_id: i64): i64 {
+    let s = sys_mmap_page();
+    let enum_buf = sys_mmap_page();
+    set_qword(enum_buf, 0, 0); # enum_count
+    set_qword(enum_buf, 1, 0); # total_variant_count
+    set_qword(s, 401, enum_buf);
+
+    set_qword(s, 0, src);
+    set_qword(s, 1, src_len);
+    set_qword(s, 2, 0); # pos = 0
+    set_qword(s, 3, uir_buf);
+    set_qword(s, 4, 0); # vreg_count = 0
+    set_qword(s, 5, 0); # label_count = 0
+    set_qword(s, 6, 0); # cur_fn_has_ret_i64 = 0
+    set_qword(s, 7, 0); # var_count = 0
+    set_qword(s, 8, 0); # fn_count = 0
+    set_qword(s, 9, 0); # stack_slot_count = 0
+    set_qword(s, 10, 0); # const_count = 0
+    set_qword(s, 11, 0); # type_alias_count = 0
+    set_qword(s, 400, target_id);
+    set_qword(s, 273, 0); # error_code = 0
+
+    # Pre-scan top-level fn and enum declarations
+    let p_pre = 0;
+    let tok_pre = sys_mmap_page();
+    while p_pre < src_len {
+        p_pre = scan_token(src, p_pre, src_len, tok_pre);
+        let k_pre = get_qword(tok_pre, 0);
+        if k_pre == TOKEN_KW_ENUM {
+            p_pre = scan_token(src, p_pre, src_len, tok_pre);
+            if get_qword(tok_pre, 0) == TOKEN_IDENT {
+                let e_off = get_qword(tok_pre, 2);
+                let e_len = get_qword(tok_pre, 3);
+                let e_hash = hash_token(src, e_off, e_len);
+                let enum_id = uf_enum_add(s, e_hash);
+                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                if get_qword(tok_pre, 0) == TOKEN_LBRACE {
+                    let cur_v = 0;
+                    p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                    while (get_qword(tok_pre, 0) != TOKEN_RBRACE) & (get_qword(tok_pre, 0) != TOKEN_EOF) & (p_pre < src_len) {
+                        if get_qword(tok_pre, 0) == TOKEN_IDENT {
+                            let v_off = get_qword(tok_pre, 2);
+                            let v_len = get_qword(tok_pre, 3);
+                            let v_hash = hash_token(src, v_off, v_len);
+                            p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                            let disc_val = cur_v;
+                            if get_qword(tok_pre, 0) == TOKEN_EQUAL {
+                                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                                let neg = 0;
+                                if get_qword(tok_pre, 0) == TOKEN_MINUS {
+                                    neg = 1;
+                                    p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                                }
+                                disc_val = get_qword(tok_pre, 1);
+                                if neg == 1 { disc_val = 0 - disc_val; }
+                                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                                cur_v = disc_val;
+                            }
+                            uf_enum_add_variant(s, enum_id, v_hash, disc_val);
+                            cur_v = cur_v + 1;
+                            if (get_qword(tok_pre, 0) == TOKEN_COMMA) | (get_qword(tok_pre, 0) == TOKEN_SEMICOLON) {
+                                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                            }
+                        } else {
+                            p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                        }
+                    }
+                }
+            }
+        } else {
+            if k_pre == TOKEN_KW_FN {
+                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                if get_qword(tok_pre, 0) == TOKEN_IDENT {
+                    let off_pre = get_qword(tok_pre, 2);
+                    let len_pre = get_qword(tok_pre, 3);
+                    let fh_pre = hash_token(src, off_pre, len_pre);
+                    p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                    if get_qword(tok_pre, 0) == TOKEN_LPAREN {
+                        let pc_pre = 0;
+                        p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                        if get_qword(tok_pre, 0) != TOKEN_RPAREN {
+                            pc_pre = 1;
+                            while (get_qword(tok_pre, 0) != TOKEN_RPAREN) & (get_qword(tok_pre, 0) != TOKEN_EOF) & (p_pre < src_len) {
+                                if get_qword(tok_pre, 0) == TOKEN_COMMA {
+                                    pc_pre = pc_pre + 1;
+                                }
+                                p_pre = scan_token(src, p_pre, src_len, tok_pre);
+                            }
+                        }
+                        let fc_pre = get_qword(s, 8);
+                        if fc_pre < 60 {
+                            set_qword(s + 2048, fc_pre * 2 + 0, fh_pre);
+                            set_qword(s + 2048, fc_pre * 2 + 1, pc_pre);
+                            set_qword(s, 8, fc_pre + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    uf_advance(s); # Prime token
+    while (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+        let k = get_qword(s + 64, 0);
+        if k == TOKEN_KW_ENUM {
+            uf_advance(s); # skip 'enum'
+            if get_qword(s + 64, 0) == TOKEN_IDENT {
+                uf_advance(s); # skip ident
+                if get_qword(s + 64, 0) == TOKEN_LBRACE {
+                    let bdepth = 1;
+                    while bdepth > 0 {
+                        let tk = uf_advance(s);
+                        if tk == TOKEN_EOF { bdepth = 0; }
+                        if tk == TOKEN_LBRACE { bdepth = bdepth + 1; }
+                        if tk == TOKEN_RBRACE { bdepth = bdepth - 1; }
+                    }
+                    uf_advance(s);
+                }
+            }
+        } else {
+            if k == TOKEN_KW_FN {
+                uf_advance(s); # consume 'fn'
+                if get_qword(s + 64, 0) != TOKEN_IDENT {
+                    set_qword(s, 273, -1);
+                } else {
+                    let fn_off = get_qword(s + 64, 2);
+                    let fn_tlen = get_qword(s + 64, 3);
+                    let fn_hash = hash_token(src, fn_off, fn_tlen);
+                    uf_advance(s); # consume ident
+                    if get_qword(s + 64, 0) != TOKEN_LPAREN {
+                        set_qword(s, 273, -1);
+                    } else {
+                        uf_advance(s); # consume '('
+
+                        # Reset locals, vregs, and labels for this function
+                        set_qword(s, 4, 0); # vreg_count = 0
+                        set_qword(s, 5, 0); # label_count = 0
+                        set_qword(s, 7, 0); # var_count = 0
+                        set_qword(s, 9, 0); # stack_slot_count = 0
+                        let param_count = 0;
+                        let params_buf = sys_mmap_page();
+                        while (get_qword(s + 64, 0) != TOKEN_RPAREN) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                            if get_qword(s + 64, 0) != TOKEN_IDENT {
+                                set_qword(s, 273, -1);
+                            } else {
+                                let p_off = get_qword(s + 64, 2);
+                                let p_len = get_qword(s + 64, 3);
+                                let p_name = hash_token(src, p_off, p_len);
+                                uf_advance(s);
+                                if get_qword(s + 64, 0) == TOKEN_COLON {
+                                    uf_advance(s);
+                                    uf_parse_type(s);
+                                    if get_qword(s, 273) < 0 { return -1; }
+                                }
+                                let p_vreg = get_qword(s, 4);
+                                set_qword(s, 4, p_vreg + 1);
+                                set_qword(params_buf, param_count, p_vreg);
+                                uf_var_lookup(s, p_name, 1, p_vreg);
+                                param_count = param_count + 1;
+                                if get_qword(s + 64, 0) == TOKEN_COMMA { uf_advance(s); }
+                            }
+                        }
+                        if get_qword(s + 64, 0) != TOKEN_RPAREN {
+                            set_qword(s, 273, -1);
+                        } else {
+                            uf_advance(s); # consume ')'
+                            let has_ret_i64 = 0;
+                            if get_qword(s + 64, 0) == TOKEN_COLON {
+                                uf_advance(s);
+                                uf_parse_type(s);
+                                if get_qword(s, 273) < 0 { return -1; }
+                                has_ret_i64 = 1;
+                            }
+                            set_qword(s, 6, has_ret_i64);
+
+                        let max_args = 16;
+                        if get_qword(s, 400) == 1 { max_args = 6; }
+                        if param_count > max_args {
+                            set_qword(s, 273, -1);
+                        }
+
+                        # If this is main, validate main signature using centralized validator
+                        if fn_hash == 6385467242 {
+                            let v = tir_validate_main(param_count, TYPE_I64, TYPE_NONE, TYPE_NONE);
+                            if v < 0 {
+                                set_qword(s, 273, -1);
+                            }
+                        }
+
+                        if get_qword(s, 273) == 0 {
+                            # Emit FUNCTION_START FIRST!
+                            uir_emit(uir_buf, UIR_FUNCTION_START, TYPE_I64, 0, 0, fn_hash, param_count, TYPE_I64, 0);
+
+                            # Emit UIR_PARAM inside the function body
+                            let pi = 0;
+                            while pi < param_count {
+                                uir_emit(uir_buf, 52, TYPE_I64, 0, 0, get_qword(params_buf, pi), pi, 0, 0);
+                                pi = pi + 1;
+                            }
+
+                            if get_qword(s + 64, 0) != TOKEN_LBRACE {
+                                set_qword(s, 273, -1);
+                            } else {
+                                uf_advance(s); # consume '{'
+
+                                while (get_qword(s + 64, 0) != TOKEN_RBRACE) & (get_qword(s + 64, 0) != TOKEN_EOF) & (get_qword(s, 273) == 0) {
+                                    uf_parse_stmt(s);
+                                }
+                                if get_qword(s + 64, 0) != TOKEN_RBRACE {
+                                    set_qword(s, 273, -1);
+                                } else {
+                                    uf_advance(s); # consume '}'
+                                    uir_emit(uir_buf, UIR_FUNCTION_END, TYPE_I64, 0, 0, fn_hash, 0, 0, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if (k == TOKEN_KW_LET) | (k == TOKEN_KW_CONST) | (k == TOKEN_KW_MUT) {
+                uf_advance(s);
+                let c_off = get_qword(s + 64, 2);
+                let c_len = get_qword(s + 64, 3);
+                let c_hash = hash_token(src, c_off, c_len);
+                uf_advance(s);
+                if get_qword(s + 64, 0) == TOKEN_COLON {
+                    uf_advance(s);
+                    uf_parse_type(s);
+                }
+                uf_advance(s); # consume '='
+                let neg = 0;
+                if get_qword(s + 64, 0) == TOKEN_MINUS {
+                    neg = 1;
+                    uf_advance(s);
+                }
+                let cval = get_qword(s + 64, 1);
+                if neg == 1 { cval = 0 - cval; }
+                uf_advance(s);
+                if get_qword(s + 64, 0) == TOKEN_SEMICOLON { uf_advance(s); }
+                uf_const_add(s, c_hash, cval);
+            } else {
+                if k == TOKEN_KW_TYPE {
+                    uf_advance(s);
+                    let t_off = get_qword(s + 64, 2);
+                    let t_len = get_qword(s + 64, 3);
+                    let t_hash = hash_token(src, t_off, t_len);
+                    uf_advance(s); # consume ident
+                    uf_advance(s); # consume '='
+                    let mapped_type = uf_parse_type(s);
+                    if get_qword(s + 64, 0) == TOKEN_SEMICOLON { uf_advance(s); }
+                    uf_type_alias_add(s, t_hash, mapped_type);
+                } else {
+                    set_qword(s, 273, -1);
+                }
+            }
+        }
+    }
+    }
+
+    if get_qword(s, 273) < 0 { return get_qword(s, 273); }
+    return uir_get_count(uir_buf);
+}

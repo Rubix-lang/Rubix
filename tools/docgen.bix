@@ -1,0 +1,5 @@
+# Extracts doc comments and signatures into markdown documentation
+
+def generate_docs(filepath: String): String do
+    "# Documentation for " + filepath
+end

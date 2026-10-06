@@ -1,0 +1,220 @@
+# pe_coff.bix - PE/COFF writing
+# Keep offsets here in sync with the PE layout below.
+
+let PE32_PLUS_OPTIONAL_HEADER_SIZE = 240;
+let PE_FILE_ALIGNMENT = 512;
+let PE_SECTION_ALIGNMENT = 4096;
+let PE_DEFAULT_IMAGE_BASE = 5368709120; # 0x140000000 default image base for x64
+
+fn pe_set_u16(buf: i64, off: i64, val: i64): i64 {
+    set_byte(buf, off, val & 255);
+    set_byte(buf, off + 1, (val >> 8) & 255);
+    return 0;
+}
+
+fn pe_set_u32(buf: i64, off: i64, val: i64): i64 {
+    set_byte(buf, off, val & 255);
+    set_byte(buf, off + 1, (val >> 8) & 255);
+    set_byte(buf, off + 2, (val >> 16) & 255);
+    set_byte(buf, off + 3, (val >> 24) & 255);
+    return 0;
+}
+
+fn pe_set_u64(buf: i64, off: i64, val: i64): i64 {
+    pe_set_u32(buf, off, val & 4294967295);
+    pe_set_u32(buf, off + 4, (val >> 32) & 4294967295);
+    return 0;
+}
+
+fn pe_align(val: i64, align_sz: i64): i64 {
+    let rem = val % align_sz;
+    if rem == 0 { return val; }
+    return val + (align_sz - rem);
+}
+
+fn pe_write_dos_header(buf: i64): i64 {
+    set_byte(buf, 0, 77);  # 'M'
+    set_byte(buf, 1, 90);  # 'Z'
+    pe_set_u16(buf, 2, 144); # e_cblp
+    pe_set_u16(buf, 4, 3);   # e_cp
+    pe_set_u16(buf, 8, 4);   # e_cparhdr
+    pe_set_u16(buf, 14, 0);  # e_ss
+    pe_set_u16(buf, 16, 184);# e_sp
+    # PE header starts at offset 0x40 directly after standard DOS header
+    pe_set_u16(buf, 60, 64); # e_lfanew
+    return 64;
+}
+
+fn pe_write_coff_header(buf: i64, off: i64, target_id: i64): i64 {
+    # "PE\0\0" signature
+    set_byte(buf, off + 0, 80);
+    set_byte(buf, off + 1, 69);
+    set_byte(buf, off + 2, 0);
+    set_byte(buf, off + 3, 0);
+
+    let coff_off = off + 4;
+    let machine_type = 34404; # IMAGE_FILE_MACHINE_AMD64 (0x8664)
+    if target_id == 2 {
+        machine_type = 43620; # IMAGE_FILE_MACHINE_ARM64 (0xAA64)
+    }
+    pe_set_u16(buf, coff_off + 0, machine_type);
+    pe_set_u16(buf, coff_off + 2, 1);    # NumberOfSections (.text)
+    pe_set_u32(buf, coff_off + 4, 0);    # TimeDateStamp (0 for reproducible builds)
+    pe_set_u32(buf, coff_off + 8, 0);    # PointerToSymbolTable
+    pe_set_u32(buf, coff_off + 12, 0);   # NumberOfSymbols
+    # PE32+ optional header is 240 bytes (0xF0)
+    pe_set_u16(buf, coff_off + 16, PE32_PLUS_OPTIONAL_HEADER_SIZE);
+    pe_set_u16(buf, coff_off + 18, 34);  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+    return coff_off + 20;
+}
+
+fn pe_write_optional_header(buf: i64, off: i64, code_len: i64): i64 {
+    let raw_code_sz = pe_align(code_len, PE_FILE_ALIGNMENT);
+
+    pe_set_u16(buf, off + 0, 523);           # Magic = 0x020B (PE32+)
+    set_byte(buf, off + 2, 1);               # MajorLinkerVersion
+    set_byte(buf, off + 3, 0);               # MinorLinkerVersion
+    pe_set_u32(buf, off + 4, raw_code_sz);   # SizeOfCode
+    pe_set_u32(buf, off + 8, 0);             # SizeOfInitializedData
+    pe_set_u32(buf, off + 12, 0);            # SizeOfUninitializedData
+    pe_set_u32(buf, off + 16, PE_SECTION_ALIGNMENT); # Entry point RVA (0x1000)
+    pe_set_u32(buf, off + 20, PE_SECTION_ALIGNMENT); # Base of code RVA (0x1000)
+    pe_set_u64(buf, off + 24, PE_DEFAULT_IMAGE_BASE);
+    pe_set_u32(buf, off + 32, PE_SECTION_ALIGNMENT); # SectionAlignment (4096)
+    pe_set_u32(buf, off + 36, PE_FILE_ALIGNMENT);    # FileAlignment (512)
+    pe_set_u16(buf, off + 40, 6);            # MajorOperatingSystemVersion
+    pe_set_u16(buf, off + 42, 0);            # MinorOperatingSystemVersion
+    pe_set_u16(buf, off + 48, 6);            # MajorSubsystemVersion
+    pe_set_u16(buf, off + 50, 0);            # MinorSubsystemVersion
+    pe_set_u32(buf, off + 56, PE_SECTION_ALIGNMENT + pe_align(code_len, PE_SECTION_ALIGNMENT)); # SizeOfImage
+    pe_set_u32(buf, off + 60, PE_FILE_ALIGNMENT);    # SizeOfHeaders
+    pe_set_u32(buf, off + 64, 0);            # CheckSum
+    pe_set_u16(buf, off + 68, 3);            # Subsystem: IMAGE_SUBSYSTEM_WINDOWS_CUI
+    pe_set_u16(buf, off + 70, 33120);        # DllCharacteristics: DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+    pe_set_u64(buf, off + 72, 1048576);      # SizeOfStackReserve (1 MB)
+    pe_set_u64(buf, off + 80, 4096);         # SizeOfStackCommit (4 KB)
+    pe_set_u64(buf, off + 88, 1048576);      # SizeOfHeapReserve (1 MB)
+    pe_set_u64(buf, off + 96, 4096);         # SizeOfHeapCommit (4 KB)
+    pe_set_u32(buf, off + 108, 16);          # NumberOfRvaAndSizes
+    return off + PE32_PLUS_OPTIONAL_HEADER_SIZE;
+}
+
+fn pe_write_section_header(buf: i64, off: i64, code_len: i64, raw_code_sz: i64): i64 {
+    # Section name ".text\0\0\0"
+    set_byte(buf, off + 0, 46); # '.'
+    set_byte(buf, off + 1, 116);# 't'
+    set_byte(buf, off + 2, 101);# 'e'
+    set_byte(buf, off + 3, 120);# 'x'
+    set_byte(buf, off + 4, 116);# 't'
+    pe_set_u32(buf, off + 8, code_len);            # VirtualSize
+    pe_set_u32(buf, off + 12, PE_SECTION_ALIGNMENT); # VirtualAddress (0x1000)
+    pe_set_u32(buf, off + 16, raw_code_sz);        # SizeOfRawData
+    pe_set_u32(buf, off + 20, PE_FILE_ALIGNMENT);  # PointerToRawData (0x200)
+    # IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ (0x60000020)
+    pe_set_u32(buf, off + 36, 1610612768);
+    return off + 40;
+}
+
+fn pe_coff_write_executable(out_path: i64, code_buf: i64, code_len: i64, target_id: i64): i64 {
+    let hdr_buf = sys_mmap_page();
+    let i = 0;
+    while i < 1024 {
+        set_byte(hdr_buf, i, 0);
+        i = i + 1;
+    }
+
+    pe_write_dos_header(hdr_buf);
+    let opt_off = pe_write_coff_header(hdr_buf, 64, target_id);
+    let sec_off = pe_write_optional_header(hdr_buf, opt_off, code_len);
+    let raw_code_sz = pe_align(code_len, PE_FILE_ALIGNMENT);
+    pe_write_section_header(hdr_buf, sec_off, code_len, raw_code_sz);
+
+    let out_fd = sys_open(out_path, 577, 493);
+    if out_fd < 0 {
+        sys_munmap(hdr_buf, 4096);
+        return -20;
+    }
+
+    let w_hdr = sys_write_all(out_fd, hdr_buf, PE_FILE_ALIGNMENT);
+    sys_munmap(hdr_buf, 4096);
+    if w_hdr != PE_FILE_ALIGNMENT {
+        sys_close(out_fd);
+        return -21;
+    }
+
+    let w_code = sys_write_all(out_fd, code_buf, code_len);
+    if w_code != code_len {
+        sys_close(out_fd);
+        return -21;
+    }
+
+    # Pad text section to PE_FILE_ALIGNMENT
+    if raw_code_sz > code_len {
+        let pad_buf = sys_mmap_page();
+        let pi = 0;
+        while pi < 512 { set_byte(pad_buf, pi, 0); pi = pi + 1; }
+        let pad_needed = raw_code_sz - code_len;
+        sys_write_all(out_fd, pad_buf, pad_needed);
+        sys_munmap(pad_buf, 4096);
+    }
+
+    sys_close(out_fd);
+    return PE_FILE_ALIGNMENT + raw_code_sz;
+}
+
+fn pe_coff_write_object(out_path: i64, code_buf: i64, code_len: i64, target_id: i64): i64 {
+    let hdr_buf = sys_mmap_page();
+    let i = 0;
+    while i < 1024 {
+        set_byte(hdr_buf, i, 0);
+        i = i + 1;
+    }
+
+    # Relocatable COFF header (20 bytes)
+    let machine_type = 34404; # 0x8664
+    if target_id == 2 {
+        machine_type = 43620; # 0xAA64
+    }
+    pe_set_u16(hdr_buf, 0, machine_type);
+    pe_set_u16(hdr_buf, 2, 1); # NumberOfSections = 1 (.text)
+    pe_set_u32(hdr_buf, 4, 0); # TimeDateStamp
+    pe_set_u32(hdr_buf, 8, 20 + 40 + code_len); # PointerToSymbolTable
+    pe_set_u32(hdr_buf, 12, 1); # NumberOfSymbols = 1 (main)
+    pe_set_u16(hdr_buf, 16, 0); # SizeOfOptionalHeader = 0 for .obj
+    pe_set_u16(hdr_buf, 18, 0); # Characteristics
+
+    # Section Header (.text, 40 bytes at offset 20)
+    set_byte(hdr_buf, 20, 46); set_byte(hdr_buf, 21, 116);
+    set_byte(hdr_buf, 22, 101); set_byte(hdr_buf, 23, 120);
+    set_byte(hdr_buf, 24, 116);
+    pe_set_u32(hdr_buf, 28, 0);        # VirtualSize
+    pe_set_u32(hdr_buf, 32, 0);        # VirtualAddress
+    pe_set_u32(hdr_buf, 36, code_len); # SizeOfRawData
+    pe_set_u32(hdr_buf, 40, 60);       # PointerToRawData = 20 + 40 = 60
+    pe_set_u32(hdr_buf, 56, 1610612768); # Characteristics = 0x60000020
+
+    let out_fd = sys_open(out_path, 577, 493);
+    if out_fd < 0 {
+        sys_munmap(hdr_buf, 4096);
+        return -20;
+    }
+
+    sys_write_all(out_fd, hdr_buf, 60);
+    sys_munmap(hdr_buf, 4096);
+    sys_write_all(out_fd, code_buf, code_len);
+
+    # Symbol Table (1 entry = 18 bytes: "main" export)
+    let sym_buf = sys_mmap_page();
+    set_byte(sym_buf, 0, 109); set_byte(sym_buf, 1, 97); # 'm', 'a'
+    set_byte(sym_buf, 2, 105); set_byte(sym_buf, 3, 110); # 'i', 'n'
+    pe_set_u32(sym_buf, 8, 0);  # Value = 0 (offset in .text)
+    pe_set_u16(sym_buf, 12, 1); # SectionNumber = 1 (.text)
+    pe_set_u16(sym_buf, 14, 32);# Type = IMAGE_SYM_TYPE_FUNC (0x20)
+    set_byte(sym_buf, 16, 2);   # StorageClass = IMAGE_SYM_CLASS_EXTERNAL
+    set_byte(sym_buf, 17, 0);   # NumberOfAuxSymbols = 0
+    sys_write_all(out_fd, sym_buf, 18);
+    sys_munmap(sym_buf, 4096);
+
+    sys_close(out_fd);
+    return 60 + code_len + 18;
+}

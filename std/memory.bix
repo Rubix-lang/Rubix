@@ -1,0 +1,115 @@
+# ==============================================================================
+# Rubix Standard Library: Memory Management & Dynamic Heap (std/memory.bix)
+# Pure native memory arena and bump allocator built on raw Linux mmap syscalls.
+# Zero C runtime, zero external libraries.
+# ==============================================================================
+
+# Memory Controller Page at well-known fixed virtual address 0x70000000 (1879048192)
+# Layout:
+#   [offset 0]: heap_base_ptr
+#   [offset 1]: heap_capacity_bytes
+#   [offset 2]: heap_offset_bytes (current watermark)
+#   [offset 3]: heap_alloc_count
+#   [offset 4]: heap_initialized_flag
+#   [offset 5]: heap_peak_usage_bytes
+
+let HEAP_META_ADDR = 1879048192; # 0x70000000
+
+fn heap_ensure_meta(): i64 {
+    let addr = sys_mmap(HEAP_META_ADDR, 4096, 3, 50, -1, 0);
+    return addr;
+}
+
+fn heap_init(initial_bytes: i64): i64 {
+    heap_ensure_meta();
+    
+    # Check if already initialized
+    if get_qword(HEAP_META_ADDR, 4) == 1 {
+        return get_qword(HEAP_META_ADDR, 0);
+    }
+    
+    let cap = initial_bytes;
+    if cap <= 0 { cap = 1048576; } # Default 1MB arena
+    
+    # Align capacity to 4KB page boundary
+    let rem = cap % 4096;
+    if rem != 0 { cap = cap + (4096 - rem); }
+    
+    let base = sys_mmap(0, cap, 3, 34, -1, 0); # PROT_READ|WRITE, MAP_PRIVATE|ANON
+    if base <= 0 { return 0; }
+    
+    set_qword(HEAP_META_ADDR, 0, base);
+    set_qword(HEAP_META_ADDR, 1, cap);
+    set_qword(HEAP_META_ADDR, 2, 0); # offset = 0
+    set_qword(HEAP_META_ADDR, 3, 0); # count = 0
+    set_qword(HEAP_META_ADDR, 4, 1); # initialized = 1
+    set_qword(HEAP_META_ADDR, 5, 0); # peak = 0
+    return base;
+}
+
+fn heap_alloc(size: i64): i64 {
+    if size <= 0 { return 0; }
+    
+    # 16-byte alignment
+    let aligned = (size + 15) / 16 * 16;
+    let base = get_qword(HEAP_META_ADDR, 0);
+    let cap = get_qword(HEAP_META_ADDR, 1);
+    let off = get_qword(HEAP_META_ADDR, 2);
+    
+    if (off + aligned) > cap {
+        # Out of memory in arena: deterministic failure handling
+        return 0;
+    }
+    
+    let mem_ptr = base + off;
+    let next_off = off + aligned;
+    set_qword(HEAP_META_ADDR, 2, next_off);
+    
+    let cnt = get_qword(HEAP_META_ADDR, 3);
+    set_qword(HEAP_META_ADDR, 3, cnt + 1);
+    
+    let peak = get_qword(HEAP_META_ADDR, 5);
+    if next_off > peak {
+        set_qword(HEAP_META_ADDR, 5, next_off);
+    }
+    
+    return mem_ptr;
+}
+
+fn heap_reset(): i64 {
+    if get_qword(HEAP_META_ADDR, 4) == 1 {
+        set_qword(HEAP_META_ADDR, 2, 0); # Reset watermark
+    }
+    return 0;
+}
+
+fn heap_free_all(): i64 {
+    if get_qword(HEAP_META_ADDR, 4) == 1 {
+        let base = get_qword(HEAP_META_ADDR, 0);
+        let cap = get_qword(HEAP_META_ADDR, 1);
+        if base > 0 {
+            sys_munmap(base, cap);
+        }
+        set_qword(HEAP_META_ADDR, 0, 0);
+        set_qword(HEAP_META_ADDR, 1, 0);
+        set_qword(HEAP_META_ADDR, 2, 0);
+        set_qword(HEAP_META_ADDR, 4, 0);
+    }
+    return 0;
+}
+
+fn heap_bytes_used(): i64 {
+    return get_qword(HEAP_META_ADDR, 2);
+}
+
+fn heap_bytes_free(): i64 {
+    return get_qword(HEAP_META_ADDR, 1) - get_qword(HEAP_META_ADDR, 2);
+}
+
+fn heap_alloc_count(): i64 {
+    return get_qword(HEAP_META_ADDR, 3);
+}
+
+fn heap_peak_used(): i64 {
+    return get_qword(HEAP_META_ADDR, 5);
+}

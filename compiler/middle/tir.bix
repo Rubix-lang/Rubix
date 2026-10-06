@@ -1,0 +1,297 @@
+# tir.bix - type size calculations, stack frame layout, and type classification
+
+
+# Legacy Typed Intermediate Representation (TIR) Constants (reclaimed for UIR)
+# (All functions below operate directly on types, not TIR opcode values)
+
+
+fn type_size(t: i64): i64 {
+    if t == TYPE_I64     { return 8; }
+    if t == TYPE_PTR     { return 8; }
+    if t == TYPE_STR     { return 8; }
+    if t == TYPE_ARRAY   { return 8; }
+    if t >= TYPE_STRUCT  { return 8; }
+    if t == TYPE_F64     { return 8; }
+    if t == TYPE_FLOAT_LIT { return 8; }
+    if t == TYPE_F32     { return 4; }
+    if t == TYPE_I32     { return 4; }
+    if t == TYPE_CHAR    { return 4; }
+    if t == TYPE_U8      { return 1; }
+    if t == TYPE_BOOL    { return 1; }
+    if t == TYPE_VOID    { return 0; }
+    if t == TYPE_INT_LIT { return 8; }
+    if t == TYPE_OPTION  { return 16; }
+    if t == TYPE_RESULT  { return 16; }
+    if t == TYPE_TUPLE   { return 16; }
+    if t == TYPE_GENERIC_PARAM { return 8; }
+    return 8;
+}
+
+fn type_is_float(t: i64): i64 {
+    if t == TYPE_F64       { return 1; }
+    if t == TYPE_F32       { return 1; }
+    if t == TYPE_FLOAT_LIT { return 1; }
+    return 0;
+}
+
+fn type_is_integer(t: i64): i64 {
+    if t == TYPE_I64     { return 1; }
+    if t == TYPE_I32     { return 1; }
+    if t == TYPE_CHAR    { return 1; }
+    if t == TYPE_U8      { return 1; }
+    if t == TYPE_INT_LIT { return 1; }
+    return 0;
+}
+
+fn type_is_compatible(expected: i64, actual: i64): i64 {
+    if expected == actual { return 1; }
+    if (expected == TYPE_GENERIC_PARAM) | (actual == TYPE_GENERIC_PARAM) { return 1; }
+    if expected == TYPE_OPTION {
+        if actual == TYPE_OPTION { return 1; }
+    }
+    if expected == TYPE_RESULT {
+        if actual == TYPE_RESULT { return 1; }
+    }
+    if expected == TYPE_TUPLE {
+        if actual == TYPE_TUPLE { return 1; }
+        if actual == TYPE_PTR   { return 1; }
+    }
+    if expected == TYPE_PTR {
+        if actual == TYPE_TUPLE { return 1; }
+    }
+    if actual == TYPE_INT_LIT {
+        if expected == TYPE_I64  { return 1; }
+        if expected == TYPE_I32  { return 1; }
+        if expected == TYPE_CHAR { return 1; }
+        if expected == TYPE_U8   { return 1; }
+    }
+    if actual == TYPE_FLOAT_LIT {
+        if expected == TYPE_F64 { return 1; }
+        if expected == TYPE_F32 { return 1; }
+    }
+    if expected == TYPE_F64 {
+        if actual == TYPE_F32 { return 1; }
+        if actual == TYPE_FLOAT_LIT { return 1; }
+    }
+    if expected == TYPE_F32 {
+        if actual == TYPE_FLOAT_LIT { return 1; }
+    }
+    if expected == TYPE_I64 {
+        if actual == TYPE_I32  { return 1; }
+        if actual == TYPE_CHAR { return 1; }
+        if actual == TYPE_U8   { return 1; }
+    }
+    if expected == TYPE_I32 {
+        if actual == TYPE_CHAR { return 1; }
+        if actual == TYPE_U8   { return 1; }
+    }
+    if expected == TYPE_CHAR {
+        if actual == TYPE_U8 { return 1; }
+    }
+    return 0;
+}
+
+fn resolve_binary_op_type(t1: i64, t2: i64): i64 {
+    if t1 == TYPE_ARRAY   { return TYPE_NONE; }
+    if t2 == TYPE_ARRAY   { return TYPE_NONE; }
+    if t1 >= TYPE_STRUCT  { return TYPE_NONE; }
+    if t2 >= TYPE_STRUCT  { return TYPE_NONE; }
+    if t1 == t2 { return t1; }
+    if (type_is_float(t1) == 1) | (type_is_float(t2) == 1) {
+        if (t1 == TYPE_F64) | (t2 == TYPE_F64) { return TYPE_F64; }
+        if (t1 == TYPE_F32) | (t2 == TYPE_F32) { return TYPE_F32; }
+        return TYPE_F64;
+    }
+    if t1 == TYPE_INT_LIT {
+        if type_is_integer(t2) == 1 { return t2; }
+    }
+    if t2 == TYPE_INT_LIT {
+        if type_is_integer(t1) == 1 { return t1; }
+    }
+    if t1 == TYPE_I64 {
+        if type_is_integer(t2) == 1 { return TYPE_I64; }
+    }
+    if t2 == TYPE_I64 {
+        if type_is_integer(t1) == 1 { return TYPE_I64; }
+    }
+    if t1 == TYPE_I32 {
+        if t2 == TYPE_CHAR { return TYPE_I32; }
+        if t2 == TYPE_U8 { return TYPE_I32; }
+    }
+    if t2 == TYPE_I32 {
+        if t1 == TYPE_CHAR { return TYPE_I32; }
+        if t1 == TYPE_U8 { return TYPE_I32; }
+    }
+    if t1 == TYPE_CHAR {
+        if t2 == TYPE_U8 { return TYPE_CHAR; }
+    }
+    if t2 == TYPE_CHAR {
+        if t1 == TYPE_U8 { return TYPE_CHAR; }
+    }
+    return TYPE_NONE;
+}
+
+fn resolve_cmp_type(t1: i64, t2: i64, op: i64): i64 {
+    if t1 == TYPE_ARRAY   { return -43; }
+    if t2 == TYPE_ARRAY   { return -43; }
+    if t1 >= TYPE_STRUCT  { return -43; }
+    if t2 >= TYPE_STRUCT  { return -43; }
+    if (type_is_float(t1) == 1) | (type_is_float(t2) == 1) {
+        return TYPE_BOOL;
+    }
+    if t1 == TYPE_STR {
+        if t2 == TYPE_STR {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -43;
+        }
+        if t2 == TYPE_INT_LIT {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -43;
+        }
+        return -43;
+    }
+    if t2 == TYPE_STR {
+        if t1 == TYPE_INT_LIT {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -43;
+        }
+        return -43;
+    }
+    if t1 == TYPE_PTR {
+        if t2 == TYPE_PTR {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -44;
+        }
+        if t2 == TYPE_INT_LIT {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -44;
+        }
+        return -44;
+    }
+    if t2 == TYPE_PTR {
+        if t1 == TYPE_INT_LIT {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -44;
+        }
+        return -44;
+    }
+    if t1 == TYPE_BOOL {
+        if t2 == TYPE_BOOL {
+            if op == TOKEN_EQUAL_EQUAL { return TYPE_BOOL; }
+            if op == TOKEN_NOT_EQUAL   { return TYPE_BOOL; }
+            return -43;
+        }
+        return -43;
+    }
+    if t2 == TYPE_BOOL {
+        return -43;
+    }
+    if type_is_integer(t1) == 1 {
+        if type_is_integer(t2) == 1 {
+            let common = resolve_binary_op_type(t1, t2);
+            if common != TYPE_NONE {
+                return TYPE_BOOL;
+            }
+        }
+    }
+    return -43;
+}
+
+
+fn tir_validate_cast(src_t: i64, dst_t: i64, src_pointee: i64, dst_pointee: i64): i64 {
+    if src_t == TYPE_VOID { return -45; } # ERR_VOID_EXPR_USED
+    if dst_t == TYPE_VOID { return -48; } # ERR_INVALID_CAST
+    if src_t == TYPE_NONE { return -48; }
+    if dst_t == TYPE_NONE { return -48; }
+    if src_t == TYPE_ARRAY { return -48; }
+    if dst_t == TYPE_ARRAY { return -48; }
+    if src_t >= TYPE_STRUCT { return -48; }
+    if dst_t >= TYPE_STRUCT { return -48; }
+
+    # String conversions
+    if src_t == TYPE_STR {
+        if dst_t == TYPE_PTR {
+            # s as *u8 or s as ptr
+            if dst_pointee == TYPE_U8 { return 1; }
+            if dst_pointee == TYPE_NONE { return 1; }
+            return -48;
+        }
+        return -48; # Cannot cast str to integer or bool
+    }
+    if dst_t == TYPE_STR {
+        if src_t == TYPE_PTR {
+            # p as str (*u8 as str, ptr as str)
+            return 1;
+        }
+        return -48; # Cannot cast scalar to str
+    }
+
+    # Pointer conversions
+    if src_t == TYPE_PTR {
+        if dst_t == TYPE_PTR {
+            return 1; # Valid pointer cast (*T as ptr, ptr as *T, *T as *U)
+        }
+        if dst_t == TYPE_I64 {
+            return 1; # Valid pointer-to-i64 cast (*T as i64)
+        }
+        return -48; # Cannot cast pointer to other types
+    }
+
+    # Integer to pointer conversions
+    if dst_t == TYPE_PTR {
+        if (src_t == TYPE_I64) | (src_t == TYPE_INT_LIT) {
+            return 1; # Valid i64-to-pointer cast (i64 as *T, 0 as *T)
+        }
+        return -48; # Cannot cast other types to pointer
+    }
+
+    # Scalar conversions (integers, floats, bool, int literals)
+    if (type_is_float(src_t) == 1) | (type_is_float(dst_t) == 1) {
+        if (type_is_integer(src_t) == 1) | (type_is_float(src_t) == 1) {
+            if (type_is_integer(dst_t) == 1) | (type_is_float(dst_t) == 1) {
+                return 1;
+            }
+        }
+    }
+    if type_is_integer(src_t) == 1 {
+        if type_is_integer(dst_t) == 1 { return 1; }
+        if dst_t == TYPE_BOOL { return 1; }
+        return -48;
+    }
+    if src_t == TYPE_BOOL {
+        if type_is_integer(dst_t) == 1 { return 1; }
+        if dst_t == TYPE_BOOL { return 1; }
+        return -48;
+    }
+
+    return -48;
+}
+
+fn tir_validate_main(param_count: i64, ret_type: i64, t0: i64, t1: i64): i64 {
+    if type_is_integer(ret_type) != 1 {
+        return -49; # ERR_INVALID_MAIN (must return integer type: i64, i32, u8)
+    }
+    if param_count == 0 {
+        return 1; # fn main(): integer is valid
+    }
+    if param_count != 2 {
+        return -49; # ERR_INVALID_MAIN (must have 0 or 2 params)
+    }
+    if t0 != TYPE_I64 {
+        return -49; # ERR_INVALID_MAIN (invalid argc type: must be i64)
+    }
+    if t1 != TYPE_PTR {
+        if t1 != TYPE_I64 {
+            return -49; # ERR_INVALID_MAIN (invalid argv type: must be *ptr or ptr)
+        }
+    }
+    return 1;
+}
+
+

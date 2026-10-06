@@ -1,0 +1,345 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native Lexer (rubix/rcs/lexer.bix)
+# Zero-allocation token scanner over UTF-8 memory buffers.
+# ==============================================================================
+
+use rcs.ast;
+
+fn rcs_is_space(c: i64): bool {
+    return (c == 32) | (c == 9) | (c == 10) | (c == 13);
+}
+
+fn rcs_is_alpha(c: i64): bool {
+    return ((c >= 97) & (c <= 122)) | ((c >= 65) & (c <= 90)) | (c == 95) | (c == 45);
+}
+
+fn rcs_is_digit(c: i64): bool {
+    return (c >= 48) & (c <= 57);
+}
+
+fn rcs_is_alnum(c: i64): bool {
+    return rcs_is_alpha(c) | rcs_is_digit(c);
+}
+
+# --- Tokenize buffer into pre-allocated token buffer ---
+fn rcs_tokenize(src: str, tokens: *RcsToken, max_tokens: i64): i64 {
+    let len = string_length(src);
+    let i = 0;
+    let count = 0;
+    let line = 1;
+    let col = 1;
+
+    while (i < len) & (count < max_tokens) {
+        let c = src[i] as i64;
+
+        # Track line/column
+        if c == 10 {
+            line = line + 1;
+            col = 1;
+            i = i + 1;
+            continue;
+        }
+
+        # Skip whitespace
+        if rcs_is_space(c) {
+            col = col + 1;
+            i = i + 1;
+            continue;
+        }
+
+        # Comments: //
+        if c == 47 {
+            if (i + 1) < len {
+                if (src[i + 1] as i64) == 47 {
+                    i = i + 2;
+                    let c_done = false;
+                    while (i < len) & (c_done == false) {
+                        if (src[i] as i64) == 10 {
+                            c_done = true;
+                        } else {
+                            i = i + 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        # Single character delimiters
+        if c == 58 { # ':'
+            tokens[count].kind = RcsTokenKind.Colon;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 59 { # ';'
+            tokens[count].kind = RcsTokenKind.Semicolon;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 123 { # '{'
+            tokens[count].kind = RcsTokenKind.LBrace;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 125 { # '}'
+            tokens[count].kind = RcsTokenKind.RBrace;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 91 { # '['
+            tokens[count].kind = RcsTokenKind.LBracket;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 93 { # ']'
+            tokens[count].kind = RcsTokenKind.RBracket;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 40 { # '('
+            tokens[count].kind = RcsTokenKind.LParen;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 41 { # ')'
+            tokens[count].kind = RcsTokenKind.RParen;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 44 { # ','
+            tokens[count].kind = RcsTokenKind.Comma;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        # At-rules: @media, @supports, @import, @container, @layer, @keyframes, @font-face
+        if c == 64 {
+            let start = i;
+            i = i + 1;
+            let at_done = false;
+            while (i < len) & (at_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_alnum(sc) | (sc == 45) {
+                    i = i + 1;
+                } else {
+                    at_done = true;
+                }
+            }
+            tokens[count].kind = RcsTokenKind.AtRule;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # String literals: "..." or '...'
+        if (c == 34) | (c == 39) {
+            let quote = c;
+            let start = i;
+            i = i + 1;
+            let s_done = false;
+            while (i < len) & (s_done == false) {
+                if (src[i] as i64) == quote {
+                    s_done = true;
+                }
+                i = i + 1;
+            }
+            tokens[count].kind = RcsTokenKind.String;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Selectors & combinators: '&', '>', '+', '~', '*', '!'
+        if (c == 38) | (c == 62) | (c == 43) | (c == 126) | (c == 42) | (c == 33) {
+            tokens[count].kind = RcsTokenKind.Operator;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        # Hex Color (#101828) or ID Selector (#header) vs '#' comment
+        if c == 35 {
+            let is_id_or_color = false;
+            if (i + 1) < len {
+                if rcs_is_alnum(src[i + 1] as i64) {
+                    is_id_or_color = true;
+                }
+            }
+            if is_id_or_color {
+                let start = i;
+                i = i + 1;
+                let col_done = false;
+                while (i < len) & (col_done == false) {
+                    if rcs_is_alnum(src[i] as i64) {
+                        i = i + 1;
+                    } else {
+                        col_done = true;
+                    }
+                }
+                tokens[count].kind = RcsTokenKind.Color;
+                tokens[count].start_offset = start;
+                tokens[count].length = i - start;
+                tokens[count].line = line;
+                tokens[count].col = col;
+                count = count + 1;
+                col = col + (i - start);
+                continue;
+            } else {
+                # '#' comment - skip until newline
+                let c_done = false;
+                while (i < len) & (c_done == false) {
+                    if (src[i] as i64) == 10 {
+                        c_done = true;
+                    } else {
+                        i = i + 1;
+                    }
+                }
+                continue;
+            }
+        }
+
+        # Numbers
+        if rcs_is_digit(c) {
+            let start = i;
+            let num_done = false;
+            while (i < len) & (num_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_digit(sc) | (sc == 46) {
+                    i = i + 1;
+                } else {
+                    num_done = true;
+                }
+            }
+            # Check unit (px, ms, s, rem)
+            let is_dim = false;
+            if i < len {
+                if rcs_is_alpha(src[i] as i64) {
+                    is_dim = true;
+                    let unit_done = false;
+                    while (i < len) & (unit_done == false) {
+                        if rcs_is_alpha(src[i] as i64) {
+                            i = i + 1;
+                        } else {
+                            unit_done = true;
+                        }
+                    }
+                }
+            }
+            if is_dim {
+                tokens[count].kind = RcsTokenKind.Dimension;
+            } else {
+                tokens[count].kind = RcsTokenKind.Number;
+            }
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Identifiers & Selectors (tag, .class, --var)
+        if rcs_is_alpha(c) | (c == 46) {
+            let start = i;
+            let id_done = false;
+            while (i < len) & (id_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_alnum(sc) | (sc == 46) | (sc == 45) {
+                    i = i + 1;
+                } else {
+                    id_done = true;
+                }
+            }
+            tokens[count].kind = RcsTokenKind.Ident;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Default advance
+        i = i + 1;
+        col = col + 1;
+    }
+
+    return count;
+}

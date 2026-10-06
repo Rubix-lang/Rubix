@@ -1,0 +1,24 @@
+
+fn executor_execute(code_buf: i64, code_len: i64): i64 {
+    if code_buf <= 0 {
+        return -98;
+    }
+    if code_len <= 0 {
+        return -97;
+    }
+
+    # Step 1: Compute page-aligned length covering the entire emitted code buffer
+    let page_aligned_len = ((code_len + 4095) / 4096) * 4096;
+
+    # Step 2: W^X transition — make memory PROT_READ | PROT_EXEC (5)
+    # Removing PROT_WRITE seals the code buffer before execution begins.
+    let prot_res = sys_mprotect(code_buf, page_aligned_len, 5);
+    if prot_res < 0 {
+        return -99;
+    }
+
+    # Step 3: Jump directly to machine-code buffer on physical CPU
+    let exit_code = sys_call_code(code_buf);
+
+    return exit_code;
+}

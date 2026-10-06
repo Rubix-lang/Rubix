@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: Rubix
+file_extensions:
+  - bix
+scope: source.rubix
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.rubix
+    - match: '"'
+      push: string
+    - match: '\b(fn|let|mut|type|enum|match|if|else|loop|for|in|use|module|return|fail|print)\b'
+      scope: keyword.control.rubix
+    - match: '\b(Integer|Float|Boolean|String|Void|Any|Int|Bool|Option|Result|Thread|Mutex|AtomicInt|Channel)\b'
+      scope: storage.type.rubix
+    - match: '\b(Some|None|Ok|Err)\b'
+      scope: support.class.rubix
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.rubix
+    - match: '\b\d+\.\d+\b'
+      scope: constant.numeric.float.rubix
+    - match: '\b\d+\b'
+      scope: constant.numeric.integer.rubix
+    - match: '(:=|\?|=>|==|!=|<=|>=|<|>|\+|-|\*|/|%)'
+      scope: keyword.operator.rubix
+
+  string:
+    - match: '"'
+      pop: true
+    - match: '\\.'
+      scope: constant.character.escape.rubix
+    - match: '[^"\\]+'
+      scope: string.quoted.double.rubix

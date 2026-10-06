@@ -1,0 +1,875 @@
+# isel.bix - x86-64 instruction selection mapping AST/TIR to machine instructions
+
+
+fn isel_emit_builtin_buffer(buf: i64, len: i64, is_free: i64, is_page: i64): i64 {
+    let l = len;
+    if is_free == 1 {
+        # mov rax, 11 (48 C7 C0 0B 00 00 00)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 11); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+        # syscall (0F 05)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5);
+        return l;
+    }
+    if is_page == 1 {
+        # xor rdi, rdi (48 31 FF)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255);
+        # mov rsi, 4096 (48 C7 C6 00 10 00 00)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 198);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 16); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+    } else {
+        # mov rsi, rdi (48 89 FE)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 254);
+        # xor rdi, rdi (48 31 FF)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255);
+    }
+    # mov rdx, 3 (48 C7 C2 03 00 00 00) - PROT_READ | PROT_WRITE
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+    l = emit_byte(buf, l, 3); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+    # mov r10, 0x22 (49 C7 C2 22 00 00 00) - MAP_PRIVATE | MAP_ANONYMOUS
+    l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+    l = emit_byte(buf, l, 34); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+    # mov r8, -1 (49 C7 C0 FF FF FF FF)
+    l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+    l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255);
+    # xor r9, r9 (4D 31 C9)
+    l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201);
+    # mov rax, 9 (48 C7 C0 09 00 00 00)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+    l = emit_byte(buf, l, 9); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+    # syscall (0F 05)
+    l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5);
+    return l;
+}
+
+fn isel_emit_builtin_mem_access(buf: i64, len: i64, is_set: i64, is_qword: i64): i64 {
+    let l = len;
+    if is_set == 1 {
+        if is_qword == 1 {
+            # mov qword ptr [rdi + rsi*8], rdx (48 89 14 F7)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 247);
+            return l;
+        }
+        # mov [rdi + rsi], dl (88 14 37)
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 55);
+        return l;
+    }
+    if is_qword == 1 {
+        # mov rax, qword ptr [rdi + rsi*8] (48 8B 04 F7)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 247);
+        return l;
+    }
+    # movzx rax, byte ptr [rdi + rsi] (48 0F B6 04 37)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 55);
+    return l;
+}
+
+fn isel_emit_syscall(buf: i64, len: i64, nr: i64): i64 {
+    let l = len;
+    # mov rax, nr (48 C7 C0 nr 00 00 00)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 199);
+    l = emit_byte(buf, l, 192);
+    l = emit_disp32(buf, l, nr);
+    # syscall (0F 05)
+    l = emit_byte(buf, l, 15);
+    l = emit_byte(buf, l, 5);
+    return l;
+}
+
+fn emit_patch_rel8(buf: i64, patch_pos: i64, target_pos: i64): i64 {
+    let disp = target_pos - (patch_pos + 1);
+    if disp < 0 { disp = disp + 256; }
+    set_byte(buf, patch_pos, disp % 256);
+    return 0;
+}
+
+fn isel_emit_builtin_string(buf: i64, len: i64, name_hash: i64): i64 {
+    let l = len;
+    if name_hash == 4604361535797710365 { # string_length
+        # test rdi, rdi (48 85 FF)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jz .L_null (74 disp8)
+            let p_null = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+            # mov rax, [rdi] (48 8B 07)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 7);
+            # jmp .L_done (EB disp8)
+            let p_done = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            # .L_null:
+            let l_null = l;
+            emit_patch_rel8(buf, p_null, l_null);
+            # xor eax, eax (31 C0)
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+            # .L_done:
+            let l_done = l;
+            emit_patch_rel8(buf, p_done, l_done);
+            return l;
+    }
+    if (name_hash == 4369978079523077955) | (name_hash == 229461282205997) { # string_byte_at / byte_at
+        # test rdi, rdi (48 85 FF)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jz .L_trap (74 disp8)
+            let p_trap1 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+            # cmp rsi, [rdi] (48 3B 37)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 59); l = emit_byte(buf, l, 55);
+            # jb .L_ok (72 disp8)
+            let p_ok = l + 1;
+            l = emit_byte(buf, l, 114); l = emit_byte(buf, l, 0);
+            # .L_trap:
+            let l_trap = l;
+            emit_patch_rel8(buf, p_trap1, l_trap);
+            # ud2 (0F 0B)
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+            # .L_ok:
+            let l_ok = l;
+            emit_patch_rel8(buf, p_ok, l_ok);
+            # movzx eax, byte ptr [rdi + rsi + 8] (48 0F B6 44 37 08)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 55); l = emit_byte(buf, l, 8);
+            return l;
+    }
+    if name_hash == -2655435116151803629 { # string_equal
+        # cmp rdi, rsi (48 39 F7)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 247);
+            # je .L_true (74 disp8)
+            let p_true1 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # test rdi, rdi (48 85 FF)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jz .L_false (74 disp8)
+            let p_false1 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # test rsi, rsi (48 85 F6)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 246);
+            # jz .L_false (74 disp8)
+            let p_false2 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # mov rcx, [rdi] (48 8B 0F)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 15);
+            # cmp rcx, [rsi] (48 3B 0E)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 59); l = emit_byte(buf, l, 14);
+            # jne .L_false (75 disp8)
+            let p_false3 = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        
+            # test rcx, rcx (48 85 C9)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+            # jz .L_true (74 disp8)
+            let p_true2 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # xor edx, edx (31 D2) - rdx is index
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 210);
+        
+            # .L_loop:
+            let l_loop = l;
+            # mov r8b, [rdi + rdx + 8] (44 8A 44 17 08)
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 68);
+            l = emit_byte(buf, l, 23); l = emit_byte(buf, l, 8);
+        
+            # cmp r8b, [rsi + rdx + 8] (44 38 44 16 08)
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 56); l = emit_byte(buf, l, 68);
+            l = emit_byte(buf, l, 22); l = emit_byte(buf, l, 8);
+        
+            # jne .L_false (75 disp8)
+            let p_false4 = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        
+            # inc rdx (48 FF C2)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 194);
+            # cmp rdx, rcx (48 39 CA)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 202);
+            # jb .L_loop (72 disp8)
+            let p_loop = l + 1;
+            l = emit_byte(buf, l, 114); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_loop, l_loop);
+        
+            # .L_true:
+            let l_true = l;
+            emit_patch_rel8(buf, p_true1, l_true);
+            emit_patch_rel8(buf, p_true2, l_true);
+            # mov eax, 1 (B8 01 00 00 00)
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+            # jmp .L_done (EB disp8)
+            let p_done = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_false:
+            let l_false = l;
+            emit_patch_rel8(buf, p_false1, l_false);
+            emit_patch_rel8(buf, p_false2, l_false);
+            emit_patch_rel8(buf, p_false3, l_false);
+            emit_patch_rel8(buf, p_false4, l_false);
+            # xor eax, eax (31 C0)
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+        
+            # .L_done:
+            let l_done = l;
+            emit_patch_rel8(buf, p_done, l_done);
+            return l;
+    }
+    if name_hash == 4369978080415288578 { # string_compare
+        # cmp rdi, rsi (48 39 F7)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 247);
+            # je .L_eq (74 disp8)
+            let p_eq1 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # test rdi, rdi (48 85 FF)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jnz .L_rdi_ok (75 disp8)
+            let p_rdi_ok = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+            # rdi is null and rsi is not null -> return -1 (mov rax, -1)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255);
+            # jmp .L_done (EB disp8)
+            let p_done1 = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_rdi_ok:
+            let l_rdi_ok = l;
+            emit_patch_rel8(buf, p_rdi_ok, l_rdi_ok);
+            # test rsi, rsi (48 85 F6)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 246);
+            # jnz .L_both_ok (75 disp8)
+            let p_both_ok = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+            # rsi is null and rdi is not null -> return 1 (mov eax, 1)
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+            # jmp .L_done
+            let p_done2 = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_both_ok:
+            let l_both_ok = l;
+            emit_patch_rel8(buf, p_both_ok, l_both_ok);
+            # mov rcx, [rdi] (len_a) (48 8B 0F)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 15);
+            # mov rdx, [rsi] (len_b) (48 8B 16)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 22);
+            # min_len in r8: r8 = rcx
+            # mov r8, rcx (49 89 C8)
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 200);
+            # cmp r8, rdx (49 39 D0)
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 208);
+            # jbe .L_min_ok (76 disp8)
+            let p_min_ok = l + 1;
+            l = emit_byte(buf, l, 118); l = emit_byte(buf, l, 0);
+            # mov r8, rdx (49 89 D0)
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 208);
+            # .L_min_ok:
+            let l_min_ok = l;
+            emit_patch_rel8(buf, p_min_ok, l_min_ok);
+        
+            # xor r9d, r9d (45 31 C9) - loop counter
+            l = emit_byte(buf, l, 69); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201);
+        
+            # .L_loop:
+            let l_loop = l;
+            # cmp r9, r8 (4D 39 C1)
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 193);
+            # jae .L_lens (73 disp8)
+            let p_lens = l + 1;
+            l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0);
+        
+            # movzx eax, byte ptr [rdi + r9 + 8] (42 0F B6 44 0F 08)
+            l = emit_byte(buf, l, 66); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 8);
+        
+            # movzx r10d, byte ptr [rsi + r9 + 8] (46 0F B6 54 0E 08)
+            l = emit_byte(buf, l, 70); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 14); l = emit_byte(buf, l, 8);
+        
+            # cmp eax, r10d (44 39 D0)
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 208);
+            # jne .L_diff (75 disp8)
+            let p_diff = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        
+            # inc r9 (49 FF C1)
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193);
+            # jmp .L_loop (EB disp8)
+            let p_loop = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_loop, l_loop);
+        
+            # .L_lens: prefix matched, compare lengths (len_a - len_b)
+            let l_lens = l;
+            emit_patch_rel8(buf, p_lens, l_lens);
+            # mov rax, rcx (48 89 C8)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 200);
+            # sub rax, rdx (48 29 D0)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+            # jmp .L_done
+            let p_done3 = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_diff: byte difference (rax = eax - r10d)
+            let l_diff = l;
+            emit_patch_rel8(buf, p_diff, l_diff);
+            # sub rax, r10 (4C 29 D0)
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+            # jmp .L_done
+            let p_done4 = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_eq:
+            let l_eq = l;
+            emit_patch_rel8(buf, p_eq1, l_eq);
+            # xor eax, eax
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+        
+            # .L_done:
+            let l_done = l;
+            emit_patch_rel8(buf, p_done1, l_done);
+            emit_patch_rel8(buf, p_done2, l_done);
+            emit_patch_rel8(buf, p_done3, l_done);
+            emit_patch_rel8(buf, p_done4, l_done);
+            return l;
+    }
+    if name_hash == 4604361535457346067 { # string_concat
+        # Check nulls and get len_a in r8, len_b in r9
+            # r8 = 0
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192); # xor r8, r8
+            # test rdi, rdi
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jz .L_rdi_null
+            let p_null_a = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+            # mov r8, [rdi] (4C 8B 07)
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 7);
+            # .L_rdi_null:
+            let l_null_a = l;
+            emit_patch_rel8(buf, p_null_a, l_null_a);
+        
+            # r9 = 0
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+            # test rsi, rsi
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 246);
+            # jz .L_rsi_null
+            let p_null_b = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+            # mov r9, [rsi] (4C 8B 0E)
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 14);
+            # .L_rsi_null:
+            let l_null_b = l;
+            emit_patch_rel8(buf, p_null_b, l_null_b);
+        
+            # total_len in r10 = r8 + r9
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194); # mov r10, r8
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 202);   # add r10, r9
+        
+            # Save rdi, rsi, r8, r9, r10 across mmap
+            l = emit_byte(buf, l, 87); # push rdi
+            l = emit_byte(buf, l, 86); # push rsi
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 80); # push r8
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 81); # push r9
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 82); # push r10
+        
+            # sys_mmap(0, r10 + 16, PROT_READ|WRITE, MAP_PRIVATE|ANON, -1, 0)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255); # xor rdi, rdi
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 214); # mov rsi, r10
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 16); # add rsi, 16
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+            l = emit_byte(buf, l, 3); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov rdx, 3
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+            l = emit_byte(buf, l, 34); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r10, 34
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); # mov r8, -1
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 9); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov rax, 9
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5); # syscall
+        
+            # Restore saved registers
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 90); # pop r10
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 89); # pop r9
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 88); # pop r8
+            l = emit_byte(buf, l, 94); # pop rsi
+            l = emit_byte(buf, l, 95); # pop rdi
+        
+            # rax is new buffer!
+            # mov [rax], r10 (store total_len header) (4C 89 10)
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 16);
+        
+            # Copy len_a (r8) bytes from [rdi + 8] to [rax + 8]
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor ecx, ecx
+            # .L_loop_a:
+            let l_loop_a = l;
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 193); # cmp rcx, r8 (4C 39 C1)
+            # jae .L_done_a
+            let p_done_a = l + 1;
+            l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 8); # mov dl, [rdi + rcx + 8]
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 8);  # mov [rax + rcx + 8], dl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193); # inc rcx
+            # jmp .L_loop_a
+            let p_loop_a = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_loop_a, l_loop_a);
+            # .L_done_a:
+            let l_done_a = l;
+            emit_patch_rel8(buf, p_done_a, l_done_a);
+        
+            # Destination pointer for b: r11 = rax + r8 + 8
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 195); # mov r11, rax
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 195);   # add r11, r8
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 195); l = emit_byte(buf, l, 8); # add r11, 8
+        
+            # Copy len_b (r9) bytes from [rsi + 8] to [r11]
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor ecx, ecx
+            # .L_loop_b:
+            let l_loop_b = l;
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 201); # cmp rcx, r9 (4C 39 C9)
+            # jae .L_done_b
+            let p_done_b = l + 1;
+            l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 14); l = emit_byte(buf, l, 8); # mov dl, [rsi + rcx + 8]
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 11); # mov [r11 + rcx], dl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193); # inc rcx
+            # jmp .L_loop_b
+            let p_loop_b = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_loop_b, l_loop_b);
+            # .L_done_b:
+            let l_done_b = l;
+            emit_patch_rel8(buf, p_done_b, l_done_b);
+        
+            # Store NUL terminator at rax + total_len + 8
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 195); # mov r11, rax
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 211);   # add r11, r10
+            l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 67); l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 0); # mov byte ptr [r11 + 8], 0
+        
+            return l;
+    }
+    if name_hash == -4552405688055474698 { # string_copy
+        # test rdi, rdi
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jz .L_zero
+            let p_zero1 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # test rsi, rsi
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 246);
+            # jz .L_zero
+            let p_zero2 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        
+            # test rdx, rdx
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 210);
+            # jle .L_zero
+            let p_zero3 = l + 1;
+            l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 0);
+        
+            # to_copy in r8 = min(n, [rsi])
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 6); # mov r8, [rsi]
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 208); # cmp r8, rdx
+            # jbe .L_min_ok
+            let p_min_ok = l + 1;
+            l = emit_byte(buf, l, 118); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 208); # mov r8, rdx
+            # .L_min_ok:
+            let l_min_ok = l;
+            emit_patch_rel8(buf, p_min_ok, l_min_ok);
+        
+            # Loop rcx = 0..r8-1
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor ecx, ecx
+            # .L_loop:
+            let l_loop = l;
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 193); # cmp rcx, r8 (4C 39 C1)
+            # jae .L_done
+            let p_done1 = l + 1;
+            l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0);
+            l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 14); l = emit_byte(buf, l, 8); # mov al, [rsi + rcx + 8]
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 15); # mov [rdi + rcx], al
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193); # inc rcx
+            # jmp .L_loop
+            let p_loop = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_loop, l_loop);
+        
+            # .L_done:
+            let l_done = l;
+            emit_patch_rel8(buf, p_done1, l_done);
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 192); # mov rax, r8 (4C 89 C0)
+            # jmp .L_exit
+            let p_exit = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_zero:
+            let l_zero = l;
+            emit_patch_rel8(buf, p_zero1, l_zero);
+            emit_patch_rel8(buf, p_zero2, l_zero);
+            emit_patch_rel8(buf, p_zero3, l_zero);
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192); # xor eax, eax
+        
+            # .L_exit:
+            let l_exit = l;
+            emit_patch_rel8(buf, p_exit, l_exit);
+            return l;
+    }
+    if name_hash == -3364675804167515880 { # string_from_raw
+        # 1. Check if rdi == 0
+            # test rdi, rdi (48 85 FF)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+            # jnz .L_scan_len (75 disp8)
+            let p_scan_len = l + 1;
+            l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        
+            # If rdi == 0, allocate empty string: len = 0
+            # xor ecx, ecx
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201);
+            # jmp .L_alloc
+            let p_alloc1 = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+        
+            # .L_scan_len:
+            let l_scan_len = l;
+            emit_patch_rel8(buf, p_scan_len, l_scan_len);
+            # xor ecx, ecx (31 C9) - rcx will hold length
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201);
+        
+            # .L_strlen_loop:
+            let l_strlen_loop = l;
+            # cmp byte ptr [rdi + rcx], 0 (80 3C 0F 00)
+            l = emit_byte(buf, l, 128); l = emit_byte(buf, l, 60); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 0);
+            # je .L_alloc
+            let p_alloc2 = l + 1;
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+            # inc rcx (48 FF C1)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193);
+            # jmp .L_strlen_loop
+            let p_strlen_loop = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_strlen_loop, l_strlen_loop);
+        
+            # .L_alloc:
+            let l_alloc = l;
+            emit_patch_rel8(buf, p_alloc1, l_alloc);
+            emit_patch_rel8(buf, p_alloc2, l_alloc);
+        
+            # Save rdi (p) and rcx (len) across mmap
+            l = emit_byte(buf, l, 87); # push rdi
+            l = emit_byte(buf, l, 81); # push rcx
+        
+            # sys_mmap(0, rcx + 16, PROT_READ|WRITE, MAP_PRIVATE|ANON, -1, 0)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255); # xor rdi, rdi
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 206); # mov rsi, rcx
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 16); # add rsi, 16
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+            l = emit_byte(buf, l, 3); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov rdx, 3
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194);
+            l = emit_byte(buf, l, 34); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r10, 34
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); # mov r8, -1
+            l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 9); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov rax, 9
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5); # syscall
+        
+            # Restore rcx (len) and rdi (p)
+            l = emit_byte(buf, l, 89); # pop rcx
+            l = emit_byte(buf, l, 95); # pop rdi
+        
+            # rax now holds allocated buffer!
+            # mov [rax], rcx (store 8-byte length header) (48 89 08)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 8);
+        
+            # Copy rcx bytes from rdi to rax + 8
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 210); # xor edx, edx
+        
+            # .L_copy_loop:
+            let l_copy_loop = l;
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 202); # cmp rdx, rcx
+            # jae .L_done_copy
+            let p_done_copy = l + 1;
+            l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0);
+        
+            # mov r8b, [rdi + rdx] (44 8A 04 17)
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 23);
+            # mov [rax + rdx + 8], r8b (44 88 44 10 08)
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 68);
+            l = emit_byte(buf, l, 16); l = emit_byte(buf, l, 8);
+            # inc rdx (48 FF C2)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 194);
+            # jmp .L_copy_loop
+            let p_copy_loop = l + 1;
+            l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+            emit_patch_rel8(buf, p_copy_loop, l_copy_loop);
+        
+            # .L_done_copy:
+            let l_done_copy = l;
+            emit_patch_rel8(buf, p_done_copy, l_done_copy);
+        
+            # Store NUL terminator at [rax + rcx + 8] (C6 44 08 08 00)
+            l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 8);
+            l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 0);
+        
+            return l;
+    }
+    if name_hash == 4604361536122115656 { # string_to_int
+        # xor rax, rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+        # test rdi, rdi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+        # jz .L_done
+        let p_done1 = l + 1;
+        l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        # mov rcx, [rdi] (len)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 15);
+        # test rcx, rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+        # jz .L_done
+        let p_done2 = l + 1;
+        l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        # lea rsi, [rdi + 8] (data)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 119); l = emit_byte(buf, l, 8);
+        # xor r8, r8 (is_neg = 0)
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+        # cmp byte ptr [rsi], 45 ('-')
+        l = emit_byte(buf, l, 128); l = emit_byte(buf, l, 62); l = emit_byte(buf, l, 45);
+        # jne .L_scan
+        let p_scan = l + 1;
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        # mov r8, 1
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+        # inc rsi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 198);
+        # dec rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 201);
+        # .L_scan:
+        let l_scan = l;
+        emit_patch_rel8(buf, p_scan, l_scan);
+        # test rcx, rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+        # jz .L_done
+        let p_done3 = l + 1;
+        l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        # .L_digit_loop:
+        let l_digit_loop = l;
+        # movzbq rdx, byte ptr [rsi]
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 22);
+        # sub rdx, 48
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 48);
+        # cmp rdx, 9
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 9);
+        # ja .L_check_neg
+        let p_check_neg = l + 1;
+        l = emit_byte(buf, l, 119); l = emit_byte(buf, l, 0);
+        # imul rax, rax, 10
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 10);
+        # add rax, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        # inc rsi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 198);
+        # dec rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 201);
+        # jnz .L_digit_loop
+        let d_loop_disp = l_digit_loop - (l + 2);
+        if d_loop_disp < 0 { d_loop_disp = d_loop_disp + 256; }
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, d_loop_disp);
+        # .L_check_neg:
+        let l_check_neg = l;
+        emit_patch_rel8(buf, p_check_neg, l_check_neg);
+        # test r8, r8
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 192);
+        # jz .L_done
+        let p_done4 = l + 1;
+        l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 0);
+        # neg rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 216);
+        # .L_done:
+        let l_done = l;
+        emit_patch_rel8(buf, p_done1, l_done);
+        emit_patch_rel8(buf, p_done2, l_done);
+        emit_patch_rel8(buf, p_done3, l_done);
+        emit_patch_rel8(buf, p_done4, l_done);
+        return l;
+        if name_hash == 249907052122048006 { # substring
+        # rdi = str, rsi = start, rdx = end
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 236); l = emit_byte(buf, l, 32); # sub rsp, 32
+        # test rdi, rdi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 255);
+        # jnz .L_str_ok (75 disp8)
+        let p_str_ok = l + 1;
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 0);
+        # xor rax, rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 196); l = emit_byte(buf, l, 32); # add rsp, 32
+        # jmp .L_done
+        let p_done0 = l + 1;
+        l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 0);
+
+        # .L_str_ok:
+        let l_str_ok = l;
+        emit_patch_rel8(buf, p_str_ok, l_str_ok);
+        # r8 = [rdi] (str_len)
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 7);
+        # test rsi, rsi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 246);
+        # jns +3
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 3);
+        # xor rsi, rsi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 246);
+        # cmp rsi, r8
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 198);
+        # jle +3
+        l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 3);
+        # mov rsi, r8
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 198);
+        # cmp rdx, r8
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 194);
+        # jle +3
+        l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 3);
+        # mov rdx, r8
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        # sub rdx, rsi (rdx = sub_len)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 242);
+        # test rdx, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 210);
+        # jns +3
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 3);
+        # xor rdx, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 210);
+
+        # Save rdi, rsi, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 60); l = emit_byte(buf, l, 36); # mov [rsp], rdi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 8); # mov [rsp + 8], rsi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 16); # mov [rsp + 16], rdx
+
+        # mmap(0, rdx + 16, 3, 34, -1, 0)
+        l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255); # xor edi, edi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 214); # mov rsi, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 16); # add rsi, 16
+        l = emit_byte(buf, l, 186); l = emit_byte(buf, l, 3); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov edx, 3
+        l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 186); l = emit_byte(buf, l, 34); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r10d, 34
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); # mov r8, -1
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+        l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 9); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov eax, 9
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5); # syscall
+
+        # Restore rdi, rsi, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 60); l = emit_byte(buf, l, 36); # mov rdi, [rsp]
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 8); # mov rsi, [rsp + 8]
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 16); # mov rdx, [rsp + 16]
+
+        # mov [rax], rdx (store len)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 16);
+
+        # Copy loop
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 55); l = emit_byte(buf, l, 8); # lea rcx, [rdi + rsi + 8]
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 8); # lea r8, [rax + 8]
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+        let l_sub_copy = l;
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 209); # cmp r9, rdx
+        let p_sub_done = l + 1;
+        l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0); # jae .L_sub_done
+        l = emit_byte(buf, l, 70); l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 9); # mov r10b, [rcx + r9]
+        l = emit_byte(buf, l, 71); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 8); # mov [r8 + r9], r10b
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193); # inc r9
+        let sc_loop_disp = l_sub_copy - (l + 2);
+        if sc_loop_disp < 0 { sc_loop_disp = sc_loop_disp + 256; }
+        l = emit_byte(buf, l, 235); l = emit_byte(buf, l, sc_loop_disp); # jmp .L_sub_copy
+
+        # .L_sub_done:
+        let l_sub_done = l;
+        emit_patch_rel8(buf, p_sub_done, l_sub_done);
+        l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 16); l = emit_byte(buf, l, 0); # mov byte ptr [r8 + rdx], 0
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 196); l = emit_byte(buf, l, 32); # add rsp, 32
+
+        # .L_done:
+        let l_done = l;
+        emit_patch_rel8(buf, p_done0, l_done);
+        return l;
+    }
+    if name_hash == 6071565643712696392 { # int_to_string
+        # rdi = val
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 236); l = emit_byte(buf, l, 48); # sub rsp, 48
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 32); # lea r8, [rsp + 32]
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193); # mov rcx, r8
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 248); # mov rax, rdi
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 192); # test rax, rax
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 10); # jns +10
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r9, 1
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 216); # neg rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 192); # test rax, rax
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 8); # jnz +8
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 201); # dec rcx
+        l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 48); # mov byte ptr [rcx], '0'
+        l = emit_byte(buf, l, 235); l = emit_byte(buf, l, 26); # jmp +26 (.L_check_neg)
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 194); l = emit_byte(buf, l, 10); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r10, 10
+        let l_i2s_div = l;
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 210); # xor rdx, rdx
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 242); # div r10
+        l = emit_byte(buf, l, 128); l = emit_byte(buf, l, 194); l = emit_byte(buf, l, 48); # add dl, '0'
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 201); # dec rcx
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 17); # mov [rcx], dl
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 192); # test rax, rax
+        let i2s_div_disp = l_i2s_div - (l + 2);
+        if i2s_div_disp < 0 { i2s_div_disp = i2s_div_disp + 256; }
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, i2s_div_disp); # jnz .L_i2s_div
+
+        # .L_check_neg:
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 1); # cmp r9, 1
+        l = emit_byte(buf, l, 117); l = emit_byte(buf, l, 6); # jne +6
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 201); # dec rcx
+        l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 45); # mov byte ptr [rcx], '-'
+
+        # calc len
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194); # mov rdx, r8
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 202); # sub rdx, rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 12); l = emit_byte(buf, l, 36); # mov [rsp], rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 8); # mov [rsp + 8], rdx
+
+        # mmap(0, rdx + 16, 3, 34, -1, 0)
+        l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 255); # xor edi, edi
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 214); # mov rsi, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 16); # add rsi, 16
+        l = emit_byte(buf, l, 186); l = emit_byte(buf, l, 3); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov edx, 3
+        l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 186); l = emit_byte(buf, l, 34); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov r10d, 34
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 199); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); # mov r8, -1
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+        l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 9); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); # mov eax, 9
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 5); # syscall
+
+        # Restore rcx, rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 12); l = emit_byte(buf, l, 36); # mov rcx, [rsp]
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, 8); # mov rdx, [rsp + 8]
+
+        # mov [rax], rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 16);
+
+        # Copy loop
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 8); # lea r8, [rax + 8]
+        l = emit_byte(buf, l, 77); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 201); # xor r9, r9
+        let l_i2s_copy = l;
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 209); # cmp r9, rdx
+        let p_i2s_done = l + 1;
+        l = emit_byte(buf, l, 115); l = emit_byte(buf, l, 0); # jae .L_i2s_done
+        l = emit_byte(buf, l, 70); l = emit_byte(buf, l, 138); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 9); # mov r10b, [rcx + r9]
+        l = emit_byte(buf, l, 71); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 20); l = emit_byte(buf, l, 8); # mov [r8 + r9], r10b
+        l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 193); # inc r9
+        let i2s_copy_disp = l_i2s_copy - (l + 2);
+        if i2s_copy_disp < 0 { i2s_copy_disp = i2s_copy_disp + 256; }
+        l = emit_byte(buf, l, 235); l = emit_byte(buf, l, i2s_copy_disp); # jmp .L_i2s_copy
+
+        # .L_i2s_done:
+        let l_i2s_done = l;
+        emit_patch_rel8(buf, p_i2s_done, l_i2s_done);
+        l = emit_byte(buf, l, 65); l = emit_byte(buf, l, 198); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 16); l = emit_byte(buf, l, 0); # mov byte ptr [r8 + rdx], 0
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 196); l = emit_byte(buf, l, 48); # add rsp, 48
+        return l;
+    }
+    return l;
+}

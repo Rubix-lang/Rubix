@@ -1,0 +1,121 @@
+# memory_layout.bix - compiler buffer architecture and table offsets
+# Defines memory spaces, buffer capacities, and symbol table offsets in tbl_buf.
+
+# Compiler working buffer capacities
+let COMPILER_TBL_BUF_SIZE     = 33554432; # 32MB Symbol and metadata table buffer
+let COMPILER_UIR_BUF_SIZE     = 2097152;  # 2MB Universal IR buffer
+let COMPILER_MIR_BUF_SIZE     = 2097152;  # 2MB Mid-level IR buffer
+let COMPILER_CODE_BUF_SIZE    = 2097152;  # 2MB Emitted native code buffer
+let COMPILER_AST_ARENA_SIZE   = 4194304;  # 4MB AST node arena
+let COMPILER_STATE_BUF_SIZE   = 4096;     # 4KB Parser state buffer
+let COMPILER_TOK_BUF_SIZE     = 4096;     # 4KB Streaming token buffer
+
+# Table buffer (tbl_buf) layout and region offsets:
+# Each region stores an entry count at the region boundary, followed by an array of entries.
+
+# Constants (90,000 .. 139,999: max 4096 entries * 16B)
+let TBL_CONST_COUNT_QWORD_IDX   = 11250; # Count at tbl_buf + (11250 * 8) = 90,000
+let TBL_CONST_BASE_OFFSET        = 90008;
+let TBL_CONST_ENTRY_SIZE         = 16;
+let TBL_CONST_MAX_CAPACITY       = 4096;
+
+# Struct metadata (140,000 .. 199,999: max 64 entries * 800B)
+let TBL_STRUCT_COUNT_QWORD_IDX   = 17500; # Count at tbl_buf + (17500 * 8) = 140,000
+let TBL_STRUCT_BASE_OFFSET       = 140008;
+let TBL_STRUCT_ENTRY_SIZE        = 800;
+let TBL_STRUCT_MAX_CAPACITY      = 64;
+
+# Enum metadata (200,000 .. 399,999: max 64 entries * 1600B)
+let TBL_ENUM_COUNT_QWORD_IDX     = 25000; # Count at tbl_buf + (25000 * 8) = 200,000
+let TBL_ENUM_BASE_OFFSET         = 200008;
+let TBL_ENUM_ENTRY_SIZE          = 1600;
+let TBL_ENUM_MAX_CAPACITY        = 64;
+
+# Variable usage tracking (400,000 and 500,000: 64KB scratch bitmasks)
+let TBL_VAR_USAGE_QWORD_IDX      = 50000;
+let TBL_VAR_USAGE_NEXT_IDX       = 62500;
+let TBL_VAR_USAGE_BASE_OFFSET    = 400000;
+let TBL_VAR_USAGE_NEXT_OFFSET    = 500000;
+let TBL_VAR_USAGE_MAX_WORDS      = 8000;
+
+# Epilogue return patch list (620,000 .. 652,767: max 4096 entries * 8B)
+let TBL_EPILOGUE_COUNT_QWORD_IDX = 77500; # Count at tbl_buf + (77500 * 8) = 620,000
+let TBL_EPILOGUE_BASE_OFFSET     = 620008;
+let TBL_EPILOGUE_ENTRY_SIZE      = 8;
+let TBL_EPILOGUE_MAX_CAPACITY    = 4096;
+
+# Local variables (2,000,000 .. 3,999,999: max 4096 entries * 48B)
+let TBL_VAR_COUNT_QWORD_IDX      = 250000; # Count at tbl_buf + (250000 * 8) = 2,000,000
+let TBL_VAR_BASE_OFFSET          = 2000008;
+let TBL_VAR_ENTRY_SIZE           = 48;
+let TBL_VAR_MAX_CAPACITY         = 4096;
+
+# Forward function call patches (4,000,000 .. 7,999,999: max 65536 entries * 16B)
+let TBL_PATCH_COUNT_QWORD_IDX    = 500000; # Count at tbl_buf + (500000 * 8) = 4,000,000
+let TBL_PATCH_BASE_OFFSET        = 4000008;
+let TBL_PATCH_ENTRY_SIZE         = 16;
+let TBL_PATCH_MAX_CAPACITY       = 65536;
+
+# Function metadata (8,000,000 .. 11,999,999: max 8192 entries * 192B)
+let TBL_FUNC_COUNT_QWORD_IDX     = 1000000; # Count at tbl_buf + (1000000 * 8) = 8,000,000
+let TBL_FUNC_BASE_OFFSET         = 8000008;
+let TBL_FUNC_ENTRY_SIZE          = 192;
+let TBL_FUNC_MAX_CAPACITY        = 8192;
+
+# Function parameter extension tables
+let TBL_FUNC_EXT_PARAMS_OFFSET   = 12000000;
+let TBL_FUNC_EXT_ENTRY_SIZE      = 160;
+
+let TBL_FUNC_PARAM_ARRLEN_OFFSET = 15000000;
+let TBL_FUNC_ARRLEN_ENTRY_SIZE   = 128;
+
+# Generic template functions and instantiations
+let TBL_GEN_FUNC_COUNT_QWORD_IDX = 33750;
+let TBL_GEN_FUNC_BASE_OFFSET     = 270008;
+let TBL_GEN_FUNC_ENTRY_SIZE      = 128;
+let TBL_GEN_FUNC_MAX_CAPACITY    = 64;
+
+let TBL_GEN_INST_COUNT_QWORD_IDX = 35000;
+let TBL_GEN_INST_BASE_OFFSET     = 280008;
+let TBL_GEN_INST_ENTRY_SIZE      = 64;
+let TBL_GEN_INST_MAX_CAPACITY    = 128;
+
+let TBL_GEN_BIND_COUNT_QWORD_IDX = 36250;
+let TBL_GEN_BIND_BASE_OFFSET     = 290008;
+let TBL_GEN_BIND_ENTRY_SIZE      = 16;
+let TBL_GEN_BIND_MAX_CAPACITY    = 32;
+
+# Runtime verification that regions do not overlap
+fn tbl_validate_memory_layout(): i64 {
+    if (TBL_CONST_BASE_OFFSET + (TBL_CONST_MAX_CAPACITY * TBL_CONST_ENTRY_SIZE)) > 140000 {
+        return -1;
+    }
+    if (TBL_STRUCT_BASE_OFFSET + (TBL_STRUCT_MAX_CAPACITY * TBL_STRUCT_ENTRY_SIZE)) > 200000 {
+        return -2;
+    }
+    if (TBL_ENUM_BASE_OFFSET + (TBL_ENUM_MAX_CAPACITY * TBL_ENUM_ENTRY_SIZE)) > 400000 {
+        return -3;
+    }
+    if (TBL_VAR_USAGE_NEXT_OFFSET + (TBL_VAR_USAGE_MAX_WORDS * 8)) > 620000 {
+        return -4;
+    }
+    if (TBL_EPILOGUE_BASE_OFFSET + (TBL_EPILOGUE_MAX_CAPACITY * TBL_EPILOGUE_ENTRY_SIZE)) > 2000000 {
+        return -5;
+    }
+    if (TBL_VAR_BASE_OFFSET + (TBL_VAR_MAX_CAPACITY * TBL_VAR_ENTRY_SIZE)) > 4000000 {
+        return -6;
+    }
+    if (TBL_PATCH_BASE_OFFSET + (TBL_PATCH_MAX_CAPACITY * TBL_PATCH_ENTRY_SIZE)) > 8000000 {
+        return -7;
+    }
+    if (TBL_FUNC_BASE_OFFSET + (TBL_FUNC_MAX_CAPACITY * TBL_FUNC_ENTRY_SIZE)) > 12000000 {
+        return -8;
+    }
+    if (TBL_FUNC_EXT_PARAMS_OFFSET + (TBL_FUNC_MAX_CAPACITY * TBL_FUNC_EXT_ENTRY_SIZE)) > 15000000 {
+        return -9;
+    }
+    if (TBL_FUNC_PARAM_ARRLEN_OFFSET + (TBL_FUNC_MAX_CAPACITY * TBL_FUNC_ARRLEN_ENTRY_SIZE)) > COMPILER_TBL_BUF_SIZE {
+        return -10;
+    }
+    return 0;
+}

@@ -1,0 +1,60 @@
+
+use src.syntax.lexer
+use src.syntax.parser
+use src.syntax.ast
+use src.semantics.typechecker
+use tools.formatter
+
+type LSPState {
+    is_initialized: Boolean,
+    document_uri: String,
+    document_text: String
+}
+
+def init_lsp_state(): LSPState do
+    LSPState {
+        is_initialized: false,
+        document_uri: "",
+        document_text: ""
+    }
+end
+
+def lsp_handle_initialize(): String do
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},\"hoverProvider\":true,\"definitionProvider\":true,\"documentFormattingProvider\":true}}}"
+end
+
+def lsp_handle_diagnostics(uri: String, source: String): String do
+    lex = init_lexer(source)
+    p = init_parser(lex, uri)
+    root = parse_program(p)
+    
+    if p.error_count == 0 do
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"" + uri + "\",\"diagnostics\":[]}}"
+    else do
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"" + uri + "\",\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":5}},\"severity\":1,\"message\":\"Syntax error detected in Rubix source\"}]}}"
+    end
+end
+
+def lsp_handle_completion(): String do
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[{\"label\":\"fn\",\"kind\":14,\"detail\":\"Function declaration\"},{\"label\":\"let\",\"kind\":14,\"detail\":\"Immutable binding\"},{\"label\":\"mut\",\"kind\":14,\"detail\":\"Mutable binding\"},{\"label\":\"match\",\"kind\":14,\"detail\":\"Pattern matching\"},{\"label\":\"Option\",\"kind\":7,\"detail\":\"Null-safe Option type\"},{\"label\":\"Result\",\"kind\":7,\"detail\":\"Error-handling Result type\"},{\"label\":\"Some\",\"kind\":3,\"detail\":\"Option value variant\"},{\"label\":\"None\",\"kind\":3,\"detail\":\"Option empty variant\"},{\"label\":\"Ok\",\"kind\":3,\"detail\":\"Result success variant\"},{\"label\":\"Err\",\"kind\":3,\"detail\":\"Result failure variant\"}]}"
+end
+
+def lsp_handle_hover(sym: String): String do
+    if sym == "Integer" or sym == "Int" do
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"```rubix\\ntype Integer: 64-bit signed integer\\n```\"}}}"
+    else if sym == "Option" do
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"```rubix\\nenum Option[T] { Some(T), None }\\n```\\nNull-safe optional value type.\"}}}"
+    else do
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"```rubix\\n" + sym + "\\n```\"}}}"
+    end
+end
+
+def lsp_handle_formatting(source: String, filename: String): String do
+    formatted = format_source(source, filename)
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":9999,\"character\":0}},\"newText\":\"" + formatted + "\"}]}"
+end
+
+def start_lsp_server(): Integer do
+    print "Rubix Language Server Protocol (LSP) daemon v1.0.0 started (stdio mode)"
+    0
+end

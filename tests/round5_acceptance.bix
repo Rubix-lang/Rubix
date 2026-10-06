@@ -1,0 +1,161 @@
+use std.collections;
+use std.memory;
+
+enum TaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed
+}
+
+fn compute_square(n: i64): i64 {
+    return n * n;
+}
+
+fn apply_op(op: *i64, arg: i64): i64 {
+    return op(arg);
+}
+
+fn safe_divide(numerator: i64, denominator: i64): Result {
+    if denominator == 0 {
+        return Err(404);
+    }
+    return Ok(numerator / denominator);
+}
+
+fn main(): i64 {
+    print "=== RUBIX ROUND 5 ACCEPTANCE TEST SUITE ===";
+
+    # 1. String literal + dynamic string
+    let s = str_new(8);
+    str_append(s, "Rubix: High-Level Language & Compiler");
+    let slen = str_len(s);
+    if slen != 37 {
+        print "FAIL: Dynamic string length";
+        return 1;
+    }
+    print "PASS 1: Dynamic string (length = 37)";
+
+    # 2. Dynamic list (vec_new, vec_push, dynamic 2x growth)
+    let v = vec_new(4);
+    # 12. Method call via UFCS (v.vec_push, v.vec_len)
+    v.vec_push(10);
+    v.vec_push(20);
+    v.vec_push(30);
+    v.vec_push(40);
+    # 3. Insert value triggering expansion from capacity 4 to 8
+    v.vec_push(50);
+    v.vec_push(60);
+
+    let vlen = v.vec_len();
+    if vlen != 6 {
+        print "FAIL: Vector length";
+        return 2;
+    }
+    if vec_cap(v) != 8 {
+        print "FAIL: Vector capacity expansion";
+        return 3;
+    }
+    print "PASS 2 & 3: Dynamic vector with 2x growth (len = 6, cap = 8)";
+
+    # 4. Iterate over list
+    let sum = 0;
+    let i = 0;
+    while i < v.vec_len() {
+        sum = sum + vec_get(v, i);
+        i = i + 1;
+    }
+    if sum != 210 {
+        print "FAIL: Vector iteration sum";
+        return 4;
+    }
+    print "PASS 4: Vector iteration sum = 210";
+
+    # 5. Create closure / function value
+    let fn_ptr = compute_square;
+    # 6. Call closure / function value directly and via higher-order function
+    let sq1 = fn_ptr(8);
+    if sq1 != 64 {
+        print "FAIL: Direct function pointer call";
+        return 5;
+    }
+    let sq2 = apply_op(compute_square, 12);
+    if sq2 != 144 {
+        print "FAIL: Higher-order function call";
+        return 6;
+    }
+    print "PASS 5 & 6: First-class function values (8^2 = 64, 12^2 = 144)";
+
+    # 7. Dynamic hash map
+    let m = map_new(16);
+    map_put(m, 1001, 555);
+    map_put(m, 1002, 777);
+    map_put(m, 1003, 999);
+    if map_get(m, 1002) != 777 {
+        print "FAIL: Hash map get";
+        return 7;
+    }
+    if map_has(m, 1003) == false {
+        print "FAIL: Hash map has";
+        return 8;
+    }
+    if map_has(m, 9999) == true {
+        print "FAIL: Hash map negative lookup";
+        return 9;
+    }
+    print "PASS 7: Dynamic hash map (put, get, has verified)";
+
+    # 8. Enum / Result (Ok & Err)
+    let ok_res = safe_divide(100, 5);
+    let err_res = safe_divide(100, 0);
+
+    # 9. Match expression & 10. Error handling
+    let ok_val = match ok_res {
+        Ok(v_ok) => v_ok,
+        Err(e_unused) => 0 - 1
+    };
+    if ok_val != 20 {
+        print "FAIL: Match Ok branch";
+        return 10;
+    }
+
+    let err_val = match err_res {
+        Ok(v_unused) => 0,
+        Err(err_code) => err_code
+    };
+    if err_val != 404 {
+        print "FAIL: Match Err branch";
+        return 11;
+    }
+    print "PASS 8, 9 & 10: Result enums, pattern matching, and error handling (Ok=20, Err=404)";
+
+    # 11. Runtime memory allocation
+    heap_init(65536);
+    let block = heap_alloc(128);
+    if block <= 0 {
+        print "FAIL: Heap allocation";
+        return 12;
+    }
+    set_qword(block, 0, 987654321);
+    set_qword(block, 1, 123456789);
+    if get_qword(block, 0) != 987654321 {
+        print "FAIL: Heap memory read/write word 0";
+        return 13;
+    }
+    if get_qword(block, 1) != 123456789 {
+        print "FAIL: Heap memory read/write word 1";
+        return 14;
+    }
+    print "PASS 11: Runtime heap memory allocation and memory safety";
+
+    # UFCS check
+    let cap = v.vec_cap();
+    if cap != 8 {
+        print "FAIL: UFCS vec_cap";
+        return 15;
+    }
+    print "PASS 12: Uniform Function Call Syntax (UFCS) methods";
+
+    print "=== ALL 15 ACCEPTANCE REQUIREMENTS VERIFIED CLEANLY ===";
+    return 0;
+}

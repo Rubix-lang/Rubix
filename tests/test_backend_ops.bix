@@ -1,0 +1,78 @@
+fn test_neg(): i64 {
+    let a = 42;
+    let b = -a;
+    let c = -b;
+    if c != 42 { return 1; }
+    let d = -(-100);
+    if d != 100 { return 2; }
+    return 0;
+}
+
+fn test_bitwise(): i64 {
+    # AND: 63 & 42 == 42
+    let a = 63 & 42;
+    if a != 42 { return 10; }
+
+    # OR: 40 | 2 == 42
+    let b = 40 | 2;
+    if b != 42 { return 11; }
+
+    # XOR: 63 ^ 21 == 42
+    let c = 63 ^ 21;
+    if c != 42 { return 12; }
+
+    # SHL: 1 << 5 == 32
+    let d = 1 << 5;
+    if d != 32 { return 13; }
+
+    # Combined: (1 << 5) | 10 == 42
+    let e = (1 << 5) | 10;
+    if e != 42 { return 14; }
+
+    # SHR: 84 >> 1 == 42
+    let f = 84 >> 1;
+    if f != 42 { return 15; }
+
+    # SAR builtin: sar(-84, 1) == -42
+    let g = sar(0 - 84, 1);
+    if g != (0 - 42) { return 16; }
+
+    return 0;
+}
+
+fn test_mul_div(): i64 {
+    # IMUL: 6 * 7 == 42
+    let a = 6 * 7;
+    if a != 42 { return 20; }
+
+    # IMUL negative: -6 * -7 == 42
+    let b = (0 - 6) * (0 - 7);
+    if b != 42 { return 21; }
+
+    # IDIV + CQO: 84 / 2 == 42
+    let c = 84 / 2;
+    if c != 42 { return 22; }
+
+    # IDIV + CQO with negative: -84 / -2 == 42
+    let d = (0 - 84) / (0 - 2);
+    if d != 42 { return 23; }
+
+    # Modulo: 85 % 43 == 42
+    let e = 85 % 43;
+    if e != 42 { return 24; }
+
+    return 0;
+}
+
+fn main(): i64 {
+    let r1 = test_neg();
+    if r1 != 0 { return r1; }
+
+    let r2 = test_bitwise();
+    if r2 != 0 { return r2; }
+
+    let r3 = test_mul_div();
+    if r3 != 0 { return r3; }
+
+    return 42;
+}

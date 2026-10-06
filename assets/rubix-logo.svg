@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="rubix-grad-top" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF4B72"/>
+      <stop offset="100%" stop-color="#E11D48"/>
+    </linearGradient>
+    <linearGradient id="rubix-grad-left" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BE123C"/>
+      <stop offset="100%" stop-color="#881337"/>
+    </linearGradient>
+    <linearGradient id="rubix-grad-right" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E11D48"/>
+      <stop offset="100%" stop-color="#9F1239"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- Background Glow -->
+  <circle cx="256" cy="256" r="220" fill="#E11D48" opacity="0.08"/>
+  
+  <!-- Isometric Hexagonal Cube Group -->
+  <g filter="url(#shadow)" transform="translate(256, 256) scale(0.95) translate(-256, -256)">
+    <!-- Top Face -->
+    <polygon points="256,80 400,160 256,240 112,160" fill="url(#rubix-grad-top)"/>
+    <!-- Right Face -->
+    <polygon points="256,240 400,160 400,320 256,400" fill="url(#rubix-grad-right)"/>
+    <!-- Left Face -->
+    <polygon points="256,240 112,160 112,320 256,400" fill="url(#rubix-grad-left)"/>
+    
+    <!-- Inner Geometric Core Accents (Rubix Precision Monogram) -->
+    <!-- Top Inset Diamond -->
+    <polygon points="256,120 340,165 256,210 172,165" fill="#FFF" opacity="0.25"/>
+    <!-- Core Center Intersection Lines -->
+    <line x1="256" y1="240" x2="256" y2="400" stroke="#FFF" stroke-width="4" opacity="0.3"/>
+    <line x1="256" y1="240" x2="400" y2="160" stroke="#FFF" stroke-width="4" opacity="0.3"/>
+    <line x1="256" y1="240" x2="112" y2="160" stroke="#FFF" stroke-width="4" opacity="0.3"/>
+  </g>
+</svg>

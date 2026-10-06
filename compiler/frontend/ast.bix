@@ -1,0 +1,292 @@
+# ast.bix - AST node kinds, arena allocation, and node constructors
+# Node memory layout (64 bytes per node in arena buffer):
+#   qword 0: kind
+#   qword 1: mutability / flags (0 = const/immutable, 1 = let/mutable)
+#   qword 2: src_off (source byte offset)
+#   qword 3: src_len (source token span length)
+#   qword 4: child_0 / next sibling
+#   qword 5: child_1 / name hash
+#   qword 6: child_2 / type id
+#   qword 7: data / value / param count
+
+
+# Core Program & Declarations
+let AST_PROGRAM       = 1;
+let AST_CONST_DECL    = 2;
+let AST_TYPE_DECL     = 3;
+let AST_INT_LIT       = 4;
+let AST_BIN_OP        = 5;
+let AST_LET_DECL      = 6;
+let AST_FN_DECL       = 7;
+let AST_PARAM         = 8;
+let AST_STRUCT_DECL   = 9;
+let AST_FIELD_DECL    = 10;
+let AST_ENUM_DECL     = 11;
+let AST_VARIANT_DECL  = 12;
+
+# Statements & Control Flow
+let AST_BLOCK         = 13;
+let AST_IF_STMT       = 14;
+let AST_WHILE_STMT    = 15;
+let AST_RETURN_STMT   = 16;
+let AST_ASSIGN_STMT   = 17;
+
+# Expressions
+let AST_CALL_EXPR     = 18;
+let AST_IDENT_EXPR    = 19;
+let AST_STR_LIT       = 20;
+let AST_UNARY_OP      = 21;
+
+fn ast_init_with_capacity(buf: i64, cap: i64): i64 {
+    set_qword(buf, 0, 0);
+    set_qword(buf, 1, cap);
+    return 0;
+}
+
+fn ast_init(buf: i64): i64 {
+    return ast_init_with_capacity(buf, 32768);
+}
+
+fn ast_alloc_node(buf: i64, kind: i64, src_off: i64, src_len: i64): i64 {
+    let count = get_qword(buf, 0);
+    let cap = get_qword(buf, 1);
+    if (count < 0) | (count >= cap) { return -1; }
+
+    # 0 is null node sentinel, first valid node is 1
+    let node_id = count + 1;
+    let base = buf + 16 + (node_id * 64);
+
+    set_qword(base, 0, kind);
+    set_qword(base, 1, 0);
+    set_qword(base, 2, src_off);
+    set_qword(base, 3, src_len);
+    set_qword(base, 4, 0);
+    set_qword(base, 5, 0);
+    set_qword(base, 6, 0);
+    set_qword(base, 7, 0);
+
+    set_qword(buf, 0, count + 1);
+    return node_id;
+}
+
+fn ast_node_kind(buf: i64, id: i64): i64 {
+    if id <= 0 { return 0; }
+    return get_qword(buf + 16 + (id * 64), 0);
+}
+
+fn ast_make_program(buf: i64, first_decl: i64): i64 {
+    let id = ast_alloc_node(buf, AST_PROGRAM, 0, 0);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 4, first_decl);
+    }
+    return id;
+}
+
+fn ast_make_const_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, val: i64, next_node: i64): i64 {
+    let id = ast_alloc_node(buf, AST_CONST_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 1, 0);
+        set_qword(base, 4, next_node);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 7, val);
+    }
+    return id;
+}
+
+fn ast_make_let_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, val: i64, next_node: i64): i64 {
+    let id = ast_alloc_node(buf, AST_LET_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 1, 1);
+        set_qword(base, 4, next_node);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 7, val);
+    }
+    return id;
+}
+
+fn ast_make_fn_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, params: i64, ret_type: i64, body: i64, next_node: i64): i64 {
+    let id = ast_alloc_node(buf, AST_FN_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, next_node);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 6, ret_type);
+        set_qword(base, 7, body);
+    }
+    return id;
+}
+
+fn ast_make_int_lit(buf: i64, src_off: i64, src_len: i64, val: i64): i64 {
+    let id = ast_alloc_node(buf, AST_INT_LIT, src_off, src_len);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 7, val);
+    }
+    return id;
+}
+
+fn ast_make_bin_op(buf: i64, src_off: i64, src_len: i64, op: i64, lhs: i64, rhs: i64): i64 {
+    let id = ast_alloc_node(buf, AST_BIN_OP, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, lhs);
+        set_qword(base, 5, rhs);
+        set_qword(base, 7, op);
+    }
+    return id;
+}
+
+fn ast_make_call_expr(buf: i64, src_off: i64, src_len: i64, fn_hash: i64, args: i64, arg_count: i64): i64 {
+    let id = ast_alloc_node(buf, AST_CALL_EXPR, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, args);
+        set_qword(base, 5, fn_hash);
+        set_qword(base, 7, arg_count);
+    }
+    return id;
+}
+
+fn ast_make_ident(buf: i64, src_off: i64, src_len: i64, name_hash: i64): i64 {
+    let id = ast_alloc_node(buf, AST_IDENT_EXPR, src_off, src_len);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 5, name_hash);
+    }
+    return id;
+}
+
+fn ast_make_return(buf: i64, src_off: i64, src_len: i64, expr: i64): i64 {
+    let id = ast_alloc_node(buf, AST_RETURN_STMT, src_off, src_len);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 4, expr);
+    }
+    return id;
+}
+
+fn ast_make_struct_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, first_field: i64, next_decl: i64): i64 {
+    let id = ast_alloc_node(buf, AST_STRUCT_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, next_decl);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 7, first_field);
+    }
+    return id;
+}
+
+fn ast_make_field_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, type_id: i64, next_field: i64): i64 {
+    let id = ast_alloc_node(buf, AST_FIELD_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, next_field);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 6, type_id);
+    }
+    return id;
+}
+
+fn ast_make_enum_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, first_variant: i64, next_decl: i64): i64 {
+    let id = ast_alloc_node(buf, AST_ENUM_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, next_decl);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 7, first_variant);
+    }
+    return id;
+}
+
+fn ast_make_variant_decl(buf: i64, src_off: i64, src_len: i64, name_hash: i64, disc_val: i64, payload_type: i64, next_variant: i64): i64 {
+    let id = ast_alloc_node(buf, AST_VARIANT_DECL, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, next_variant);
+        set_qword(base, 5, name_hash);
+        set_qword(base, 6, payload_type);
+        set_qword(base, 7, disc_val);
+    }
+    return id;
+}
+
+fn ast_make_if_stmt(buf: i64, src_off: i64, src_len: i64, cond_expr: i64, then_block: i64, else_block: i64): i64 {
+    let id = ast_alloc_node(buf, AST_IF_STMT, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, then_block);
+        set_qword(base, 5, cond_expr);
+        set_qword(base, 6, else_block);
+    }
+    return id;
+}
+
+fn ast_make_while_stmt(buf: i64, src_off: i64, src_len: i64, cond_expr: i64, body_block: i64): i64 {
+    let id = ast_alloc_node(buf, AST_WHILE_STMT, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, body_block);
+        set_qword(base, 5, cond_expr);
+    }
+    return id;
+}
+
+fn ast_make_block(buf: i64, src_off: i64, src_len: i64, first_stmt: i64): i64 {
+    let id = ast_alloc_node(buf, AST_BLOCK, src_off, src_len);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 4, first_stmt);
+    }
+    return id;
+}
+
+fn ast_make_assign_stmt(buf: i64, src_off: i64, src_len: i64, target_expr: i64, val_expr: i64): i64 {
+    let id = ast_alloc_node(buf, AST_ASSIGN_STMT, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, target_expr);
+        set_qword(base, 7, val_expr);
+    }
+    return id;
+}
+
+fn ast_make_str_lit(buf: i64, src_off: i64, src_len: i64, str_hash: i64): i64 {
+    let id = ast_alloc_node(buf, AST_STR_LIT, src_off, src_len);
+    if id > 0 {
+        set_qword(buf + 16 + (id * 64), 5, str_hash);
+    }
+    return id;
+}
+
+fn ast_make_unary_op(buf: i64, src_off: i64, src_len: i64, op: i64, expr: i64): i64 {
+    let id = ast_alloc_node(buf, AST_UNARY_OP, src_off, src_len);
+    if id > 0 {
+        let base = buf + 16 + (id * 64);
+        set_qword(base, 4, expr);
+        set_qword(base, 7, op);
+    }
+    return id;
+}
+
+fn ast_dump_node_kind_name(kind: i64): str {
+    if kind == 1 { return "Program"; }
+    if kind == 2 { return "ConstDecl"; }
+    if kind == 3 { return "TypeDecl"; }
+    if kind == 4 { return "IntLiteral"; }
+    if kind == 5 { return "BinaryOp"; }
+    if kind == 6 { return "LetDecl"; }
+    if kind == 7 { return "FunctionDecl"; }
+    if kind == 8 { return "Parameter"; }
+    if kind == 9 { return "StructDecl"; }
+    if kind == 10 { return "FieldDecl"; }
+    if kind == 11 { return "EnumDecl"; }
+    if kind == 12 { return "VariantDecl"; }
+    if kind == 13 { return "Block"; }
+    if kind == 14 { return "IfStmt"; }
+    if kind == 15 { return "WhileStmt"; }
+    if kind == 16 { return "ReturnStmt"; }
+    if kind == 17 { return "AssignStmt"; }
+    if kind == 18 { return "CallExpr"; }
+    if kind == 19 { return "IdentExpr"; }
+    if kind == 20 { return "StringLiteral"; }
+    if kind == 21 { return "UnaryOp"; }
+    return "Unknown";
+}

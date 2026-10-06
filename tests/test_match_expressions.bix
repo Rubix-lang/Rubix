@@ -1,0 +1,58 @@
+# ==============================================================================
+# Rubix Test: Match Expressions as Proper Primary Expressions
+# Verifies match inside let, return, function call, and arithmetic expressions.
+# ==============================================================================
+
+fn helper(n: i64): i64 {
+    return n * 2;
+}
+
+fn test_let(x: i64): i64 {
+    let res = match x {
+        1 => 10,
+        2 => 20,
+        _ => 30,
+    };
+    return res;
+}
+
+fn test_return(x: i64): i64 {
+    return match x {
+        1 => 100,
+        2 => 200,
+        _ => 300,
+    };
+}
+
+fn test_call(x: i64): i64 {
+    return helper(match x {
+        1 => 5,
+        _ => 10,
+    });
+}
+
+fn test_arith(x: i64): i64 {
+    let result = 1 + match x {
+        1 => 10,
+        _ => 20,
+    };
+    return result;
+}
+
+fn main(): i64 {
+    if test_let(1) != 10 { return 1; }
+    if test_let(2) != 20 { return 2; }
+    if test_let(3) != 30 { return 3; }
+
+    if test_return(1) != 100 { return 4; }
+    if test_return(2) != 200 { return 5; }
+
+    if test_call(1) != 10 { return 6; }
+    if test_call(2) != 20 { return 7; }
+
+    if test_arith(1) != 11 { return 8; }
+    if test_arith(2) != 21 { return 9; }
+
+    print "PASS: Match expressions as first-class primary expressions verified.";
+    return 0;
+}

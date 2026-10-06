@@ -1,0 +1,36 @@
+# ==============================================================================
+# Rubix Universal Machine Synthesis (RUMS) — Target Machine Description
+# Target Architecture: REX (Rubix Execution eXchange)
+# Portable execution exchange target with structured value flow & bounded memory.
+# Zero physical registers, zero fake stack frames, zero CPU ABI.
+# ==============================================================================
+
+target rex {
+    machine_format_version: 1;
+    target_type: portable;
+    word_size: 8;
+    endianness: little;
+    stack_alignment: 8;
+    stack_direction: none;
+    instruction_width: 0;
+    pc_relative_calls: false;
+    regalloc_required: false;
+    machine_frame_required: false;
+    output_format: rex;
+}
+
+# Value Slots Model: Virtual slots mapped directly without physical spill limits
+registers {
+    reg 0  v0  param0  false  value_slot;
+    reg 1  v1  param1  false  value_slot;
+    reg 2  v2  param2  false  value_slot;
+    reg 3  v3  param3  false  value_slot;
+}
+
+calling_convention value_exchange {
+    args: [v0, v1, v2, v3];
+    return_reg: v0;
+    scratch_pool: [];
+    preserved_pool: [];
+    stack_entry_disp: 0;
+}

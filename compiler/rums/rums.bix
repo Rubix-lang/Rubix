@@ -1,0 +1,606 @@
+# rums.bix - machine synthesizer engine translating UIR to native bytes using .machine models
+
+# Target Identifiers (for convenience / CLI dispatch)
+
+let TARGET_X86_64 = 1;
+let TARGET_ARM64 = 2;
+let TARGET_RISCV64 = 3;
+let TARGET_REX = 4;
+let TARGET_SYNTHETIC = 99;
+
+# Precomputed hash of "main" identifier (hash_token("main", 4))
+let FN_HASH_MAIN = 6385467242;
+
+# ------------------------------------------------------------------------------
+# Target File Path Resolvers
+# ------------------------------------------------------------------------------
+fn rums_get_target_path(target_id: i64, path_buf: i64): i64 {
+    # "targets/"
+    set_byte(path_buf, 0, 116); set_byte(path_buf, 1, 97); set_byte(path_buf, 2, 114); set_byte(path_buf, 3, 103);
+    set_byte(path_buf, 4, 101); set_byte(path_buf, 5, 116); set_byte(path_buf, 6, 115); set_byte(path_buf, 7, 47);
+
+    if target_id == TARGET_X86_64 {
+        # "x86_64.machine"
+        set_byte(path_buf, 8, 120); set_byte(path_buf, 9, 56); set_byte(path_buf, 10, 54); set_byte(path_buf, 11, 95);
+        set_byte(path_buf, 12, 54); set_byte(path_buf, 13, 52); set_byte(path_buf, 14, 46); set_byte(path_buf, 15, 109);
+        set_byte(path_buf, 16, 97); set_byte(path_buf, 17, 99); set_byte(path_buf, 18, 104); set_byte(path_buf, 19, 105);
+        set_byte(path_buf, 20, 110); set_byte(path_buf, 21, 101); set_byte(path_buf, 22, 0);
+        return 22;
+    }
+    if target_id == TARGET_ARM64 {
+        # "arm64.machine"
+        set_byte(path_buf, 8, 97); set_byte(path_buf, 9, 114); set_byte(path_buf, 10, 109); set_byte(path_buf, 11, 54);
+        set_byte(path_buf, 12, 52); set_byte(path_buf, 13, 46); set_byte(path_buf, 14, 109); set_byte(path_buf, 15, 97);
+        set_byte(path_buf, 16, 99); set_byte(path_buf, 17, 104); set_byte(path_buf, 18, 105); set_byte(path_buf, 19, 110);
+        set_byte(path_buf, 20, 101); set_byte(path_buf, 21, 0);
+        return 21;
+    }
+    if target_id == TARGET_RISCV64 {
+        # "riscv64.machine"
+        set_byte(path_buf, 8, 114); set_byte(path_buf, 9, 105); set_byte(path_buf, 10, 115); set_byte(path_buf, 11, 99);
+        set_byte(path_buf, 12, 118); set_byte(path_buf, 13, 54); set_byte(path_buf, 14, 52); set_byte(path_buf, 15, 46);
+        set_byte(path_buf, 16, 109); set_byte(path_buf, 17, 97); set_byte(path_buf, 18, 99); set_byte(path_buf, 19, 104);
+        set_byte(path_buf, 20, 105); set_byte(path_buf, 21, 110); set_byte(path_buf, 22, 101); set_byte(path_buf, 23, 0);
+        return 23;
+    }
+    if target_id == TARGET_REX {
+        # "rex.machine"
+        set_byte(path_buf, 8, 114); set_byte(path_buf, 9, 101); set_byte(path_buf, 10, 120); set_byte(path_buf, 11, 46);
+        set_byte(path_buf, 12, 109); set_byte(path_buf, 13, 97); set_byte(path_buf, 14, 99); set_byte(path_buf, 15, 104);
+        set_byte(path_buf, 16, 105); set_byte(path_buf, 17, 110); set_byte(path_buf, 18, 101); set_byte(path_buf, 19, 0);
+        return 19;
+    }
+    if target_id == TARGET_SYNTHETIC {
+        # "synthetic.machine"
+        set_byte(path_buf, 8, 115); set_byte(path_buf, 9, 121); set_byte(path_buf, 10, 110); set_byte(path_buf, 11, 116);
+        set_byte(path_buf, 12, 104); set_byte(path_buf, 13, 101); set_byte(path_buf, 14, 116); set_byte(path_buf, 15, 105);
+        set_byte(path_buf, 16, 99); set_byte(path_buf, 17, 46); set_byte(path_buf, 18, 109); set_byte(path_buf, 19, 97);
+        set_byte(path_buf, 20, 99); set_byte(path_buf, 21, 104); set_byte(path_buf, 22, 105); set_byte(path_buf, 23, 110);
+        set_byte(path_buf, 24, 101); set_byte(path_buf, 25, 0);
+        return 25;
+    }
+    return 0;
+}
+
+# ------------------------------------------------------------------------------
+# Universal Model-Driven Function Synthesizer:
+# Lowers a UIR function into native machine bytes using ONLY the loaded model.
+# Zero target-specific branch logic -- all machine facts come from mach_model.
+# ------------------------------------------------------------------------------
+fn rums_synthesize_function_ex(uir_buf: i64, start_node: i64, end_node: i64, code_buf: i64, start_len: i64, model: i64, prog_call_patches: i64): i64 {
+    let cur = start_len;
+
+    # 1. Fetch Register Pool directly from machine model
+    let pool = sys_mmap_page();
+    let pool_sz = mach_model_get_scratch_pool(model, pool);
+
+    # Check if function makes any calls or uses stack
+    let has_calls = 0;
+    let local_stack_bytes = 0;
+    let has_stack_params = 0;
+    let abi_cnt = get_qword(model, 9);
+    let scan_i = start_node;
+    while scan_i < end_node {
+        let chk_addr = uir_node_addr(uir_buf, scan_i);
+        let chk_op = get_qword(chk_addr, 0);
+        if chk_op == 56 { # UIR_CALL
+            has_calls = 1;
+        }
+        if chk_op == 40 { # ALLOC_STACK
+            let sz = get_qword(chk_addr, 5);
+            local_stack_bytes = local_stack_bytes + sz;
+        }
+        if chk_op == 52 { # PARAM
+            let p_idx = get_qword(chk_addr, 5);
+            if p_idx >= abi_cnt {
+                has_stack_params = 1;
+            }
+        }
+        scan_i = scan_i + 1;
+    }
+
+    # 2. Linear-Scan Register Allocation with Preferred Register Hints (from model)
+    let intervals = sys_mmap_page();
+    let hints = sys_mmap_page();
+    regalloc_compute_liveness_ex(uir_buf, start_node, end_node, intervals, hints, model);
+    let spills = regalloc_linear_scan_ex(intervals, 64, pool, pool_sz, hints);
+
+    # Leaf function frame elimination: if no calls, no spills, no local stack, and no stack params
+    let is_leaf = 0;
+    if (has_calls == 0) & (spills == 0) & (local_stack_bytes == 0) & (has_stack_params == 0) {
+        is_leaf = 1;
+    }
+
+    let frame_sz = 768 + (spills * 8) + local_stack_bytes;
+    frame_sz = (frame_sz + 15) & (0 - 16);
+
+    # 3. Emit Function Prologue (omitted for leaf functions)
+    if is_leaf == 0 {
+        cur = mach_model_emit_prologue(model, code_buf, cur, frame_sz);
+    }
+
+    # 4. Tables for labels and argument preparation
+    let label_tbl = sys_mmap_page();
+    let li = 0;
+    while li < 128 {
+        set_qword(label_tbl, li, -1);
+        li = li + 1;
+    }
+
+    let patch_tbl = sys_mmap(0, 65536, 3, 34, -1, 0);
+    let arg_slots = sys_mmap_page();
+
+    # 5. Synthesize Instructions Driven by Model
+    let ni = start_node;
+    while ni < end_node {
+        let addr = uir_node_addr(uir_buf, ni);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let fl = get_qword(addr, 2);
+        let imm1 = fl & 1;
+        let imm2 = (fl >> 1) & 1;
+        let target = mach_model_get_target_id(model);
+        let sp_base_reg = mach_model_get_sp_reg(model);
+
+        if op == 52 { # PARAM
+            let dst_loc = regalloc_get_location(intervals, dst);
+            if dst_loc >= 0 {
+                let param_abi_reg = mach_model_get_abi_arg_reg(model, s1);
+                if param_abi_reg >= 0 {
+                    if dst_loc != param_abi_reg {
+                        cur = mach_model_emit_mov_reg(model, code_buf, cur, dst_loc, param_abi_reg);
+                    }
+                } else {
+                    let abi_cnt = get_qword(model, 9);
+                    let stack_offset = 0;
+                    if (target == 1) | (target == 2) {
+                        stack_offset = 16;
+                    }
+                    let stack_param_disp = frame_sz + stack_offset + ((s1 - abi_cnt) * 8);
+                    cur = mach_model_emit_load(model, code_buf, cur, dst_loc, sp_base_reg, stack_param_disp);
+                }
+            }
+        }
+
+        if op == 1 { # CONST
+            let dst_loc = regalloc_get_location(intervals, dst);
+            if dst_loc >= 0 {
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, dst_loc, s1);
+            }
+        }
+
+        if op == 2 { # MOVE
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            if (dst_loc >= 0) & (s1_loc >= 0) {
+                if dst_loc != s1_loc {
+                    cur = mach_model_emit_mov_reg(model, code_buf, cur, dst_loc, s1_loc);
+                }
+            }
+        }
+
+        # Arithmetic & Bitwise
+        let is_bin = 0;
+        if (op >= 10) & (op <= 12) { is_bin = 1; }
+        if (op >= 20) & (op <= 22) { is_bin = 1; }
+        if (op >= 24) & (op <= 25) { is_bin = 1; }
+
+        let scratch_reg = mach_model_get_scratch_reg(model);
+
+        if (op >= 10) & (op <= 12) { # ADD, SUB, MUL
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            let s2_loc = -1;
+            if imm2 == 1 {
+                s2_loc = scratch_reg;
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s2);
+            } else {
+                s2_loc = regalloc_get_location(intervals, s2);
+            }
+            if (dst_loc >= 0) & (s1_loc >= 0) & (s2_loc >= 0) {
+                cur = mach_model_emit_bin_op(model, code_buf, cur, op, dst_loc, s1_loc, s2_loc);
+            }
+        }
+
+        if (op >= 20) & (op <= 25) { # AND, OR, XOR, SHL, SAR (excluding NOT)
+            if op != 23 {
+                let dst_loc = regalloc_get_location(intervals, dst);
+                let s1_loc = regalloc_get_location(intervals, s1);
+                let s2_loc = -1;
+                if imm2 == 1 {
+                    s2_loc = scratch_reg;
+                    cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s2);
+                } else {
+                    s2_loc = regalloc_get_location(intervals, s2);
+                }
+                if (dst_loc >= 0) & (s1_loc >= 0) & (s2_loc >= 0) {
+                    cur = mach_model_emit_bin_op(model, code_buf, cur, op, dst_loc, s1_loc, s2_loc);
+                }
+            }
+        }
+
+        if (op == 13) | (op == 14) { # DIV, MOD
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            let s2_loc = -1;
+            if imm2 == 1 {
+                s2_loc = scratch_reg;
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s2);
+            } else {
+                s2_loc = regalloc_get_location(intervals, s2);
+            }
+            if (dst_loc >= 0) & (s1_loc >= 0) & (s2_loc >= 0) {
+                cur = mach_model_emit_div_mod(model, code_buf, cur, op, dst_loc, s1_loc, s2_loc);
+            }
+        }
+
+        if (op == 15) | (op == 23) { # NEG, NOT
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            if (dst_loc >= 0) & (s1_loc >= 0) {
+                cur = mach_model_emit_unary_op(model, code_buf, cur, op, dst_loc, s1_loc);
+            }
+        }
+
+        # Comparisons (30..35)
+        if (op >= 30) & (op <= 35) {
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            let s2_loc = -1;
+            if imm2 == 1 {
+                s2_loc = scratch_reg;
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s2);
+            } else {
+                s2_loc = regalloc_get_location(intervals, s2);
+            }
+            if (dst_loc >= 0) & (s1_loc >= 0) & (s2_loc >= 0) {
+                cur = mach_model_emit_cmp(model, code_buf, cur, op, dst_loc, s1_loc, s2_loc);
+            }
+        }
+
+        # Control Flow: Labels & Jumps
+        if op == 53 { # UIR_LABEL
+            let lbl = dst;
+            set_qword(label_tbl, lbl, cur);
+            let p_cnt = get_qword(patch_tbl, lbl * 16 + 0);
+            let pi = 0;
+            while pi < p_cnt {
+                let p_pos = get_qword(patch_tbl, lbl * 16 + 1 + pi);
+                mach_model_backpatch(model, code_buf, p_pos, cur);
+                pi = pi + 1;
+            }
+        }
+
+        if op == 54 { # UIR_JUMP
+            let lbl = dst;
+            let target = get_qword(label_tbl, lbl);
+            if target >= 0 {
+                cur = mach_model_emit_jump(model, code_buf, cur, target - cur);
+            } else {
+                let p_pos = cur;
+                cur = mach_model_emit_jump(model, code_buf, cur, 0);
+                let p_cnt = get_qword(patch_tbl, lbl * 16 + 0);
+                if p_cnt < 15 {
+                    set_qword(patch_tbl, lbl * 16 + 1 + p_cnt, p_pos);
+                    set_qword(patch_tbl, lbl * 16 + 0, p_cnt + 1);
+                }
+            }
+        }
+
+        if op == 55 { # UIR_BRANCH
+            let s1_loc = regalloc_get_location(intervals, s1);
+            let lbl_t = dst;
+            let lbl_f = s2;
+
+            let target_t = get_qword(label_tbl, lbl_t);
+            if target_t >= 0 {
+                cur = mach_model_emit_branch_cond(model, code_buf, cur, s1_loc, target_t - cur);
+            } else {
+                let p_pos_t = cur;
+                cur = mach_model_emit_branch_cond(model, code_buf, cur, s1_loc, 0);
+                let p_cnt_t = get_qword(patch_tbl, lbl_t * 16 + 0);
+                if p_cnt_t < 15 {
+                    set_qword(patch_tbl, lbl_t * 16 + 1 + p_cnt_t, p_pos_t);
+                    set_qword(patch_tbl, lbl_t * 16 + 0, p_cnt_t + 1);
+                }
+            }
+
+            let target_f = get_qword(label_tbl, lbl_f);
+            if target_f >= 0 {
+                cur = mach_model_emit_jump(model, code_buf, cur, target_f - cur);
+            } else {
+                let p_pos_f = cur;
+                cur = mach_model_emit_jump(model, code_buf, cur, 0);
+                let p_cnt_f = get_qword(patch_tbl, lbl_f * 16 + 0);
+                if p_cnt_f < 15 {
+                    set_qword(patch_tbl, lbl_f * 16 + 1 + p_cnt_f, p_pos_f);
+                    set_qword(patch_tbl, lbl_f * 16 + 0, p_cnt_f + 1);
+                }
+            }
+        }
+
+        # Memory Operations
+        if op == 41 { # ADDR_OF
+            let dst_loc = regalloc_get_location(intervals, dst);
+            if dst_loc >= 0 {
+                cur = mach_model_emit_addr_of(model, code_buf, cur, dst_loc, s1);
+            }
+        }
+
+        if op == 42 { # UIR_LOAD
+            let dst_loc = regalloc_get_location(intervals, dst);
+            let s1_loc = regalloc_get_location(intervals, s1);
+            if (dst_loc >= 0) & (s1_loc >= 0) {
+                let disp = get_qword(addr, 7);
+                cur = mach_model_emit_load(model, code_buf, cur, dst_loc, s1_loc, disp);
+            }
+        }
+
+        if op == 43 { # UIR_STORE
+            let s1_loc = regalloc_get_location(intervals, s1);
+            let s2_loc = -1;
+            if imm2 == 1 {
+                s2_loc = scratch_reg;
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s2);
+            } else {
+                s2_loc = regalloc_get_location(intervals, s2);
+            }
+            if (s1_loc >= 0) & (s2_loc >= 0) {
+                let disp = get_qword(addr, 7);
+                cur = mach_model_emit_store(model, code_buf, cur, s1_loc, disp, s2_loc);
+            }
+        }
+
+        # Function Calls & Arguments
+        if op == 58 { # ARG
+            let arg_idx = dst;
+            let arg_disp = 600 + (arg_idx * 8);
+
+            if imm1 == 1 {
+                cur = mach_model_emit_mov_imm(model, code_buf, cur, scratch_reg, s1);
+                cur = mach_model_emit_store(model, code_buf, cur, sp_base_reg, arg_disp, scratch_reg);
+            } else {
+                let s1_loc = regalloc_get_location(intervals, s1);
+                if s1_loc >= 0 {
+                    cur = mach_model_emit_store(model, code_buf, cur, sp_base_reg, arg_disp, s1_loc);
+                }
+            }
+        }
+
+        if op == 56 { # UIR_CALL
+            let target_fn_hash = s1;
+            let arg_cnt = s2;
+
+            # 1. Save caller-saved virtual registers that are live across this call
+
+            let vi = 0;
+            while vi < 64 {
+                let v_base = intervals + (vi * 48);
+                if get_qword(v_base, 0) == 1 { # defined
+                    let v_start = get_qword(v_base, 1);
+                    let v_end = get_qword(v_base, 2);
+                    let v_phys = get_qword(v_base, 3);
+                    if (v_start < ni) & (v_end > ni) & (v_phys >= 0) & (vi != dst) {
+                        let save_disp = 64 + (vi * 8);
+                        cur = mach_model_emit_store(model, code_buf, cur, sp_base_reg, save_disp, v_phys);
+                    }
+                }
+                vi = vi + 1;
+            }
+
+            # 2. Setup call arguments directly from argument slots (no register clobbering)
+            let ai = 0;
+            while ai < arg_cnt {
+                let abi_reg = mach_model_get_abi_arg_reg(model, ai);
+                let arg_disp = 600 + (ai * 8);
+                if abi_reg >= 0 {
+                    cur = mach_model_emit_load(model, code_buf, cur, abi_reg, sp_base_reg, arg_disp);
+                } else {
+                    let abi_cnt = get_qword(model, 9);
+                    let out_stack_disp = (ai - abi_cnt) * 8;
+                    cur = mach_model_emit_load(model, code_buf, cur, scratch_reg, sp_base_reg, arg_disp);
+                    cur = mach_model_emit_store(model, code_buf, cur, sp_base_reg, out_stack_disp, scratch_reg);
+                }
+                ai = ai + 1;
+            }
+
+            # 3. Emit call instruction
+            let call_patch = cur;
+            cur = mach_model_emit_call(model, code_buf, cur, 0);
+            if prog_call_patches > 0 {
+                let cp_count = get_qword(prog_call_patches, 0);
+                set_qword(prog_call_patches, 1 + cp_count * 2 + 0, target_fn_hash);
+                set_qword(prog_call_patches, 1 + cp_count * 2 + 1, call_patch);
+                set_qword(prog_call_patches, 0, cp_count + 1);
+            }
+
+            # 4. Save return value into scratch_reg before restoring caller-saved registers
+            if dst >= 0 {
+                let ret_reg = mach_model_get_abi_return_reg(model);
+                cur = mach_model_emit_mov_reg(model, code_buf, cur, scratch_reg, ret_reg);
+            }
+
+            # 5. Restore caller-saved registers
+            vi = 0;
+            while vi < 64 {
+                let v_base = intervals + (vi * 48);
+                if get_qword(v_base, 0) == 1 { # defined
+                    let v_start = get_qword(v_base, 1);
+                    let v_end = get_qword(v_base, 2);
+                    let v_phys = get_qword(v_base, 3);
+                    if (v_start < ni) & (v_end > ni) & (v_phys >= 0) & (vi != dst) {
+                        let save_disp = 64 + (vi * 8);
+                        cur = mach_model_emit_load(model, code_buf, cur, v_phys, sp_base_reg, save_disp);
+                    }
+                }
+                vi = vi + 1;
+            }
+
+            # 6. Put return value into dst_loc
+            if dst >= 0 {
+                let dst_loc = regalloc_get_location(intervals, dst);
+                if dst_loc >= 0 {
+                    cur = mach_model_emit_mov_reg(model, code_buf, cur, dst_loc, scratch_reg);
+                }
+            }
+        }
+
+        if op == 57 { # RETURN
+            if s1 >= 0 {
+                let ret_abi_reg = mach_model_get_abi_return_reg(model);
+                if imm1 == 1 {
+                    cur = mach_model_emit_mov_imm(model, code_buf, cur, ret_abi_reg, s1);
+                } else {
+                    let s1_loc = regalloc_get_location(intervals, s1);
+                    if (s1_loc >= 0) & (s1_loc != ret_abi_reg) {
+                        cur = mach_model_emit_mov_reg(model, code_buf, cur, ret_abi_reg, s1_loc);
+                    }
+                }
+            }
+            if is_leaf == 0 {
+                cur = mach_model_emit_epilogue(model, code_buf, cur, frame_sz);
+            } else {
+                cur = mach_model_emit_return(model, code_buf, cur);
+            }
+        }
+
+        ni = ni + 1;
+    }
+
+    return cur;
+}
+
+fn rums_synthesize_function_model(uir_buf: i64, start_node: i64, end_node: i64, code_buf: i64, start_len: i64, model: i64): i64 {
+    return rums_synthesize_function_ex(uir_buf, start_node, end_node, code_buf, start_len, model, 0);
+}
+
+# ------------------------------------------------------------------------------
+# High-Level Synthesizer Entry Points
+# ------------------------------------------------------------------------------
+fn rums_synthesize_function_file(uir_buf: i64, start_node: i64, end_node: i64, code_buf: i64, start_len: i64, machine_path: i64): i64 {
+    let model = sys_mmap_page();
+    let load_res = machdesc_load_file(machine_path, model);
+    if load_res < 0 {
+        return load_res;
+    }
+    return rums_synthesize_function_model(uir_buf, start_node, end_node, code_buf, start_len, model);
+}
+
+fn rums_synthesize_function(uir_buf: i64, start_node: i64, end_node: i64, code_buf: i64, start_len: i64, target_or_model: i64): i64 {
+    if target_or_model >= 65536 {
+        return rums_synthesize_function_model(uir_buf, start_node, end_node, code_buf, start_len, target_or_model);
+    }
+    let path_buf = sys_mmap_page();
+    let plen = rums_get_target_path(target_or_model, path_buf);
+    if plen <= 0 {
+        return -50;
+    }
+    return rums_synthesize_function_file(uir_buf, start_node, end_node, code_buf, start_len, path_buf);
+}
+
+fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i64 {
+    let model = 0;
+    if target_or_model >= 65536 {
+        model = target_or_model;
+    } else {
+        let path_buf = sys_mmap_page();
+        let plen = rums_get_target_path(target_or_model, path_buf);
+        if plen <= 0 {
+            return -50;
+        }
+        model = sys_mmap_page();
+        let load_res = machdesc_load_file(path_buf, model);
+        if load_res < 0 {
+            return load_res;
+        }
+    }
+
+    # Query target synthesis capability: portable vs CPU
+    let target_type = mach_model_get_target_type(model);
+    if target_type == 2 { # TARGET_TYPE_PORTABLE (REX)
+        return rex_lower_uir_program(uir_buf, code_buf);
+    }
+
+    let l = 0;
+
+    # 1. Emit process startup stub
+    let main_call_patch = l;
+    l = mach_model_emit_startup(model, code_buf, l);
+
+    # 2. Function table & program call patch table
+    let func_tbl = sys_mmap_page();
+    let func_count = 0;
+    let call_patches = sys_mmap_page();
+    set_qword(call_patches, 0, 0);
+
+    # 3. Iterate through functions in uir_buf
+    let total_nodes = uir_get_count(uir_buf);
+    let ni = 0;
+    while ni < total_nodes {
+        let n_addr = uir_node_addr(uir_buf, ni);
+        if get_qword(n_addr, 0) == 50 { # UIR_FUNCTION_START
+            let fn_hash = get_qword(n_addr, 4);
+            let fn_start_node = ni;
+            let fn_end_node = ni + 1;
+            let searching = 1;
+            while (fn_end_node < total_nodes) & (searching == 1) {
+                let chk_addr = uir_node_addr(uir_buf, fn_end_node);
+                if get_qword(chk_addr, 0) == 51 { # UIR_FUNCTION_END
+                    searching = 0;
+                } else {
+                    fn_end_node = fn_end_node + 1;
+                }
+            }
+
+            set_qword(func_tbl, func_count * 2 + 0, fn_hash);
+            set_qword(func_tbl, func_count * 2 + 1, l);
+            func_count = func_count + 1;
+
+            l = rums_synthesize_function_ex(uir_buf, fn_start_node, fn_end_node, code_buf, l, model, call_patches);
+            ni = fn_end_node;
+        }
+        ni = ni + 1;
+    }
+
+    # 4. Find main function offset (FN_HASH_MAIN is precomputed hash_token("main", 4))
+    let main_hash = FN_HASH_MAIN;
+    let main_offset = -1;
+    let fi = 0;
+    while fi < func_count {
+        if get_qword(func_tbl, fi * 2 + 0) == main_hash {
+            main_offset = get_qword(func_tbl, fi * 2 + 1);
+        }
+        fi = fi + 1;
+    }
+    if main_offset >= 0 {
+        mach_model_backpatch(model, code_buf, main_call_patch, main_offset);
+    } else {
+        return -1;
+    }
+
+    # 5. Backpatch inter-function calls
+    let total_calls = get_qword(call_patches, 0);
+    let ci = 0;
+    while ci < total_calls {
+        let target_hash = get_qword(call_patches, 1 + ci * 2 + 0);
+        let patch_pos = get_qword(call_patches, 1 + ci * 2 + 1);
+        let target_offset = -1;
+        fi = 0;
+        while fi < func_count {
+            if get_qword(func_tbl, fi * 2 + 0) == target_hash {
+                target_offset = get_qword(func_tbl, fi * 2 + 1);
+            }
+            fi = fi + 1;
+        }
+        if target_offset >= 0 {
+            mach_model_backpatch(model, code_buf, patch_pos, target_offset);
+        } else {
+            return -1;
+        }
+        ci = ci + 1;
+    }
+
+    return l;
+}

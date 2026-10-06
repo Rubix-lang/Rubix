@@ -1,0 +1,679 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native CSS Emitter (rubix/rcs/emit_css.bix)
+# Generates W3C-compliant CSS text from parsed RCS source.
+# Dual target: this is the browser/CSS output path.
+# ==============================================================================
+
+use rcs.ast;
+use rcs.tokens;
+use rcs.motion;
+use rcs.resolver;
+
+struct CssRuleTarget {
+    selector: str,
+    comment: str,
+    props: str,
+    animations: str,
+    anim_count: i64,
+    has_flex: bool,
+    has_grid: bool,
+    at_rule: str
+}
+
+fn rcs_trigger_to_pseudo(trigger: str): str {
+    if str_eq(trigger, "hover") { return ":hover"; }
+    if str_eq(trigger, "focus") { return ":focus"; }
+    if str_eq(trigger, "click") { return ":active"; }
+    if str_eq(trigger, "active") { return ":active"; }
+    if str_eq(trigger, "checked") { return ":checked"; }
+    if str_eq(trigger, "disabled") { return ":disabled"; }
+    if str_eq(trigger, "focus-visible") { return ":focus-visible"; }
+    if str_eq(trigger, "focus-within") { return ":focus-within"; }
+    if str_eq(trigger, "in-view") | str_eq(trigger, "scroll") | str_eq(trigger, "visible") {
+        return "[data-in-view]";
+    }
+    return "";
+}
+
+fn rcs_combine_selectors(parent: str, child: str): str {
+    let p_len = string_length(parent);
+    let c_len = string_length(child);
+    if p_len == 0 { return child; }
+    if c_len == 0 { return parent; }
+    if string_starts_with(child, "&") {
+        let rest = string_slice(child, 1, c_len - 1);
+        return parent + rest;
+    }
+    if string_starts_with(child, ":") {
+        return parent + child;
+    }
+    if string_starts_with(child, ">") | string_starts_with(child, "+") | string_starts_with(child, "~") {
+        return parent + " " + child;
+    }
+    return parent + " " + child;
+}
+
+fn rcs_emit_css(src: str): str {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let max_depth = 16;
+    let sel_stack = alloc_buffer(128) as *str;
+    let at_stack = alloc_buffer(128) as *str;
+    let stack_depth = 0;
+    sel_stack[0] = "";
+    at_stack[0] = "";
+
+    let max_targets = 256;
+    let targets = alloc_buffer(16384) as *CssRuleTarget;
+    let target_count = 0;
+
+    let top_imports = "";
+    let emitted_keyframes = "";
+    let all_keyframes = "";
+    let t_idx = 0;
+
+    while t_idx < tok_count {
+        if tokens[t_idx].kind == RcsTokenKind.Semicolon {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        if tokens[t_idx].kind == RcsTokenKind.RBrace {
+            if stack_depth > 0 {
+                stack_depth = stack_depth - 1;
+            }
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        # Statement at-rule (e.g. @import "..."; or @charset "...";)
+        if tokens[t_idx].kind == RcsTokenKind.AtRule {
+            let chk = t_idx;
+            let has_semi_first = false;
+            while (chk < tok_count) & (tokens[chk].kind != RcsTokenKind.LBrace) & (tokens[chk].kind != RcsTokenKind.RBrace) & (has_semi_first == false) {
+                if tokens[chk].kind == RcsTokenKind.Semicolon {
+                    has_semi_first = true;
+                } else {
+                    chk = chk + 1;
+                }
+            }
+            if has_semi_first {
+                let stmt_start = tokens[t_idx].start_offset;
+                let stmt_end = tokens[chk].start_offset;
+                let stmt_str = string_trim(string_slice(src, stmt_start, stmt_end - stmt_start));
+                top_imports = top_imports + stmt_str + ";\n";
+                t_idx = chk + 1;
+                continue;
+            }
+        }
+
+        # Look ahead for opening '{' vs ';'
+        let look = t_idx;
+        let found_lbrace = false;
+        let found_semi = false;
+        let p_depth = 0;
+        while (look < tok_count) & (found_lbrace == false) & (found_semi == false) {
+            if tokens[look].kind == RcsTokenKind.LParen {
+                p_depth = p_depth + 1;
+            }
+            if tokens[look].kind == RcsTokenKind.RParen {
+                if p_depth > 0 { p_depth = p_depth - 1; }
+            }
+            if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.RBrace) {
+                found_semi = true;
+            } else {
+                if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.LBrace) {
+                    found_lbrace = true;
+                } else {
+                    if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.Semicolon) {
+                        found_semi = true;
+                    } else {
+                        look = look + 1;
+                    }
+                }
+            }
+        }
+
+        if found_lbrace {
+            let hdr_start = tokens[t_idx].start_offset;
+            let hdr_end = tokens[look - 1].start_offset + tokens[look - 1].length;
+            let header = string_trim(string_slice(src, hdr_start, hdr_end - hdr_start));
+            t_idx = look + 1;
+
+            if string_starts_with(header, "@") {
+                if stack_depth < (max_depth - 1) {
+                    stack_depth = stack_depth + 1;
+                    sel_stack[stack_depth] = sel_stack[stack_depth - 1];
+                    at_stack[stack_depth] = header;
+                }
+                continue;
+            }
+
+            let when_idx = string_index_of(header, " when ");
+            let raw_sel = header;
+            let cond_text = "";
+            if when_idx >= 0 {
+                raw_sel = string_trim(string_slice(header, 0, when_idx));
+                cond_text = string_trim(string_slice(header, when_idx + 6, string_length(header) - (when_idx + 6)));
+            }
+
+            let parent_sel = sel_stack[stack_depth];
+            let combined_sel = rcs_combine_selectors(parent_sel, raw_sel);
+            let cur_at = at_stack[stack_depth];
+
+            if stack_depth < (max_depth - 1) {
+                stack_depth = stack_depth + 1;
+                sel_stack[stack_depth] = combined_sel;
+                at_stack[stack_depth] = cur_at;
+            }
+
+            let base_idx = -1;
+            let si = 0;
+            while si < target_count {
+                if str_eq(targets[si].selector, combined_sel) & str_eq(targets[si].at_rule, cur_at) {
+                    base_idx = si;
+                    si = target_count;
+                } else {
+                    si = si + 1;
+                }
+            }
+            if base_idx < 0 {
+                if target_count < max_targets {
+                    base_idx = target_count;
+                    targets[base_idx].selector = combined_sel;
+                    targets[base_idx].at_rule = cur_at;
+                    let rule_comment = "";
+                    if string_length(cond_text) > 0 {
+                        rule_comment = "/* when " + cond_text + " */\n";
+                    }
+                    targets[base_idx].comment = rule_comment;
+                    targets[base_idx].props = "";
+                    targets[base_idx].animations = "";
+                    targets[base_idx].anim_count = 0;
+                    targets[base_idx].has_flex = false;
+                    targets[base_idx].has_grid = false;
+                    target_count = target_count + 1;
+                }
+            } else {
+                if (string_length(cond_text) > 0) & (string_length(targets[base_idx].comment) == 0) {
+                    targets[base_idx].comment = "/* when " + cond_text + " */\n";
+                }
+            }
+            continue;
+        }
+
+        # Declaration or motion statement within current block
+        if stack_depth == 0 {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        let cur_sel = sel_stack[stack_depth];
+        let cur_at = at_stack[stack_depth];
+
+        let base_idx = -1;
+        let si = 0;
+        while si < target_count {
+            if str_eq(targets[si].selector, cur_sel) & str_eq(targets[si].at_rule, cur_at) {
+                base_idx = si;
+                si = target_count;
+            } else {
+                si = si + 1;
+            }
+        }
+        if base_idx < 0 {
+            if target_count < max_targets {
+                base_idx = target_count;
+                targets[base_idx].selector = cur_sel;
+                targets[base_idx].at_rule = cur_at;
+                targets[base_idx].comment = "";
+                targets[base_idx].props = "";
+                targets[base_idx].animations = "";
+                targets[base_idx].anim_count = 0;
+                targets[base_idx].has_flex = false;
+                targets[base_idx].has_grid = false;
+                target_count = target_count + 1;
+            }
+        }
+
+        let first = rcs_token_text(src, &tokens[t_idx]);
+
+        if str_eq(first, "center") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  align-items: center;\n  justify-content: center;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "row") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  flex-direction: row;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "col") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  flex-direction: column;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "grid") {
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  display: grid;\n";
+                targets[base_idx].has_grid = true;
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "tilt") {
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  transform: perspective(800px) rotateY(5deg);\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "depth") {
+            t_idx = t_idx + 1;
+            let depth_val = "20";
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                depth_val = rcs_token_text(src, &tokens[t_idx]);
+                t_idx = t_idx + 1;
+            }
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  transform: translateZ(" + depth_val + "px);\n";
+            }
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if rcs_is_motion_verb(first) {
+            let verb = first;
+            let direction = "";
+            let amount = "0";
+            let trigger = "load";
+            let feel = "smooth";
+            let repeat = "1";
+            let delay = "0";
+
+            t_idx = t_idx + 1;
+
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let mw = rcs_token_text(src, &tokens[t_idx]);
+                let handled = false;
+
+                if str_eq(mw, "up") | str_eq(mw, "down") | str_eq(mw, "left") | str_eq(mw, "right") | str_eq(mw, "in") | str_eq(mw, "out") {
+                    direction = mw;
+                    handled = true;
+                    if (t_idx + 1) < tok_count {
+                        if tokens[t_idx + 1].kind == RcsTokenKind.Number {
+                            t_idx = t_idx + 1;
+                            amount = rcs_token_text(src, &tokens[t_idx]);
+                        }
+                    }
+                }
+                if str_eq(mw, "on") {
+                    t_idx = t_idx + 1;
+                    if t_idx < tok_count {
+                        trigger = rcs_token_text(src, &tokens[t_idx]);
+                    }
+                    handled = true;
+                }
+                if str_eq(mw, "infinite") | str_eq(mw, "forever") | str_eq(mw, "loop") {
+                    repeat = "infinite";
+                    handled = true;
+                }
+                if str_eq(mw, "once") {
+                    repeat = "1 forwards";
+                    handled = true;
+                }
+                if str_eq(mw, "after") {
+                    t_idx = t_idx + 1;
+                    if t_idx < tok_count {
+                        let dtok = rcs_token_text(src, &tokens[t_idx]);
+                        if string_ends_with(dtok, "ms") {
+                            delay = string_slice(dtok, 0, string_length(dtok) - 2);
+                        } else {
+                            if string_ends_with(dtok, "s") {
+                                delay = string_slice(dtok, 0, string_length(dtok) - 1) + "000";
+                            } else {
+                                delay = dtok;
+                            }
+                        }
+                    }
+                    handled = true;
+                }
+                if handled == false {
+                    if (rcs_feel_to_duration(mw) != 250) | str_eq(mw, "smooth") | str_eq(mw, "springy") | str_eq(mw, "gentle") | str_eq(mw, "slow") | str_eq(mw, "snappy") {
+                        feel = mw;
+                    }
+                }
+
+                t_idx = t_idx + 1;
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+
+            let anim_name = "rcs-" + verb;
+            if string_length(direction) > 0 {
+                anim_name = anim_name + "-" + direction;
+            }
+
+            let kf_needle = "|" + anim_name + "|";
+            if string_contains(emitted_keyframes, kf_needle) == false {
+                emitted_keyframes = emitted_keyframes + kf_needle;
+                let kf_block = rcs_build_keyframes(anim_name, verb, direction, amount);
+                all_keyframes = all_keyframes + kf_block + "\n";
+            }
+
+            let duration_str = rcs_int_to_str(rcs_feel_to_duration(feel));
+            let timing = rcs_feel_to_timing(feel);
+            let anim_desc = anim_name + " " + duration_str + "ms " + timing;
+            if !str_eq(delay, "0") {
+                anim_desc = anim_desc + " " + delay + "ms";
+            }
+            if str_eq(repeat, "infinite") {
+                anim_desc = anim_desc + " infinite";
+            } else {
+                if str_eq(repeat, "1 forwards") {
+                    anim_desc = anim_desc + " 1 forwards";
+                }
+            }
+
+            let pseudo = rcs_trigger_to_pseudo(trigger);
+            let anim_target_sel = cur_sel;
+            if string_length(pseudo) > 0 {
+                if string_ends_with(cur_sel, pseudo) {
+                    anim_target_sel = cur_sel;
+                } else {
+                    anim_target_sel = cur_sel + pseudo;
+                }
+            }
+
+            let anim_target_idx = -1;
+            let ai = 0;
+            while ai < target_count {
+                if str_eq(targets[ai].selector, anim_target_sel) & str_eq(targets[ai].at_rule, cur_at) {
+                    anim_target_idx = ai;
+                    ai = target_count;
+                } else {
+                    ai = ai + 1;
+                }
+            }
+            if anim_target_idx < 0 {
+                if target_count < max_targets {
+                    anim_target_idx = target_count;
+                    targets[anim_target_idx].selector = anim_target_sel;
+                    targets[anim_target_idx].at_rule = cur_at;
+                    targets[anim_target_idx].comment = "";
+                    targets[anim_target_idx].props = "";
+                    targets[anim_target_idx].animations = "";
+                    targets[anim_target_idx].anim_count = 0;
+                    targets[anim_target_idx].has_flex = false;
+                    targets[anim_target_idx].has_grid = false;
+                    target_count = target_count + 1;
+                }
+            }
+
+            if anim_target_idx >= 0 {
+                if targets[anim_target_idx].anim_count == 0 {
+                    targets[anim_target_idx].animations = anim_desc;
+                } else {
+                    targets[anim_target_idx].animations = targets[anim_target_idx].animations + ", " + anim_desc;
+                }
+                targets[anim_target_idx].anim_count = targets[anim_target_idx].anim_count + 1;
+            }
+
+            continue;
+        }
+
+        # Property declaration: prop: val;
+        let prop = first;
+        t_idx = t_idx + 1;
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+            t_idx = t_idx + 1;
+            let val_start = -1;
+            let val_end = -1;
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                if val_start < 0 {
+                    val_start = tokens[t_idx].start_offset;
+                }
+                val_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+            let val_str = "";
+            if val_start >= 0 {
+                val_str = string_trim(string_slice(src, val_start, val_end - val_start));
+            }
+
+            let canon_prop = rcs_map_property(prop);
+            let resolved_val = rcs_resolve_value(canon_prop, val_str);
+
+            if base_idx >= 0 {
+                if str_eq(canon_prop, "gap") {
+                    if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                        targets[base_idx].props = targets[base_idx].props + "  display: flex;\n  flex-direction: column;\n";
+                        targets[base_idx].has_flex = true;
+                    }
+                }
+                if str_eq(canon_prop, "display") {
+                    if string_contains(resolved_val, "flex") {
+                        targets[base_idx].has_flex = true;
+                    }
+                    if string_contains(resolved_val, "grid") {
+                        targets[base_idx].has_grid = true;
+                    }
+                }
+
+                targets[base_idx].props = targets[base_idx].props + "  " + canon_prop + ": " + resolved_val + ";\n";
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+        } else {
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+        }
+    }
+
+    let css = "";
+    if string_length(top_imports) > 0 {
+        css = top_imports + "\n";
+    }
+
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+
+    # Phase 1: Top-level rules (at_rule == "")
+    let r_i = 0;
+    while r_i < target_count {
+        if string_length(targets[r_i].at_rule) == 0 {
+            let rule_body = targets[r_i].props;
+            let is_inf = string_contains(targets[r_i].animations, "infinite");
+
+            if (targets[r_i].anim_count > 0) & (is_inf == false) {
+                rule_body = rule_body + "  animation: " + targets[r_i].animations + ";\n";
+            }
+            if string_length(rule_body) > 0 {
+                if string_length(targets[r_i].comment) > 0 {
+                    css = css + targets[r_i].comment;
+                }
+                css = css + targets[r_i].selector + " " + lb + "\n" + rule_body + rb + "\n\n";
+            }
+
+            if (targets[r_i].anim_count > 0) & is_inf {
+                if (string_length(rule_body) == 0) & (string_length(targets[r_i].comment) > 0) {
+                    css = css + targets[r_i].comment;
+                }
+                css = css + "@media (prefers-reduced-motion: no-preference) " + lb + "\n  " + targets[r_i].selector + " " + lb + "\n    animation: " + targets[r_i].animations + ";\n  " + rb + "\n" + rb + "\n\n";
+            }
+        }
+        r_i = r_i + 1;
+    }
+
+    # Phase 2: Group and emit at-rule blocks (@media, @supports, @container, etc.)
+    let emitted_at_rules = "";
+    let a_i = 0;
+    while a_i < target_count {
+        let cur_at = targets[a_i].at_rule;
+        if string_length(cur_at) > 0 {
+            let at_marker = "|" + cur_at + "|";
+            if string_contains(emitted_at_rules, at_marker) == false {
+                emitted_at_rules = emitted_at_rules + at_marker;
+
+                let at_body = "";
+                let b_i = 0;
+                while b_i < target_count {
+                    if str_eq(targets[b_i].at_rule, cur_at) {
+                        let inner_body = targets[b_i].props;
+                        if targets[b_i].anim_count > 0 {
+                            inner_body = inner_body + "  animation: " + targets[b_i].animations + ";\n";
+                        }
+                        if string_length(inner_body) > 0 {
+                            if string_length(targets[b_i].comment) > 0 {
+                                at_body = at_body + "  " + targets[b_i].comment;
+                            }
+                            at_body = at_body + "  " + targets[b_i].selector + " " + lb + "\n  " + inner_body + "  " + rb + "\n";
+                        }
+                    }
+                    b_i = b_i + 1;
+                }
+
+                if string_length(at_body) > 0 {
+                    css = css + cur_at + " " + lb + "\n" + at_body + rb + "\n\n";
+                }
+            }
+        }
+        a_i = a_i + 1;
+    }
+
+    # Phase 3: Emit keyframes
+    if string_length(all_keyframes) > 0 {
+        css = css + all_keyframes;
+    }
+
+    free_buffer(sel_stack as ptr, 128);
+    free_buffer(at_stack as ptr, 128);
+    free_buffer(targets as ptr, 16384);
+    free_buffer(tokens as ptr, 32768);
+    return css;
+}
+
+# --- Build @keyframes block for a given verb + direction ---
+fn rcs_build_keyframes(name: str, verb: str, direction: str, amount: str): str {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let kf = "@keyframes " + name + " " + lb + "\n";
+
+    if str_eq(verb, "fade") {
+        if str_eq(direction, "out") {
+            return kf + "  from " + lb + " opacity: 1; " + rb + "\n  to " + lb + " opacity: 0; " + rb + "\n" + rb + "\n";
+        }
+        return kf + "  from " + lb + " opacity: 0; " + rb + "\n  to " + lb + " opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "slide") {
+        let dist = "20px";
+        if !str_eq(amount, "0") {
+            dist = amount + "px";
+        }
+        if str_eq(direction, "up") {
+            return kf + "  from " + lb + " transform: translateY(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "down") {
+            return kf + "  from " + lb + " transform: translateY(-" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "left") {
+            return kf + "  from " + lb + " transform: translateX(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateX(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "right") {
+            return kf + "  from " + lb + " transform: translateX(-" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateX(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        return kf + "  from " + lb + " transform: translateY(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "pop") | str_eq(verb, "zoom") {
+        return kf + "  from " + lb + " transform: scale(0.8); opacity: 0; " + rb + "\n  to " + lb + " transform: scale(1); opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "bounce") {
+        return kf + "  0% " + lb + " transform: translateY(0); " + rb + "\n  40% " + lb + " transform: translateY(-15px); " + rb + "\n  60% " + lb + " transform: translateY(-7px); " + rb + "\n  100% " + lb + " transform: translateY(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "pulse") {
+        return kf + "  0% " + lb + " transform: scale(1); " + rb + "\n  50% " + lb + " transform: scale(1.05); " + rb + "\n  100% " + lb + " transform: scale(1); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "spin") {
+        return kf + "  from " + lb + " transform: rotate(0deg); " + rb + "\n  to " + lb + " transform: rotate(360deg); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "shake") {
+        return kf + "  0% " + lb + " transform: translateX(0); " + rb + "\n  25% " + lb + " transform: translateX(-5px); " + rb + "\n  50% " + lb + " transform: translateX(5px); " + rb + "\n  75% " + lb + " transform: translateX(-5px); " + rb + "\n  100% " + lb + " transform: translateX(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "glow") {
+        return kf + "  0% " + lb + " box-shadow: 0 0 5px rgba(37, 99, 235, 0.2); " + rb + "\n  50% " + lb + " box-shadow: 0 0 20px rgba(37, 99, 235, 0.6); " + rb + "\n  100% " + lb + " box-shadow: 0 0 5px rgba(37, 99, 235, 0.2); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "float") {
+        return kf + "  0% " + lb + " transform: translateY(0); " + rb + "\n  50% " + lb + " transform: translateY(-10px); " + rb + "\n  100% " + lb + " transform: translateY(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "flip") {
+        return kf + "  from " + lb + " transform: perspective(600px) rotateY(0); " + rb + "\n  to " + lb + " transform: perspective(600px) rotateY(360deg); " + rb + "\n" + rb + "\n";
+    }
+    return kf + "  from " + lb + " opacity: 0; " + rb + "\n  to " + lb + " opacity: 1; " + rb + "\n" + rb + "\n";
+}
+
+fn rcs_int_to_str(n: i64): str {
+    if n == 0 { return "0"; }
+
+    let neg = false;
+    let val = n;
+    if val < 0 {
+        neg = true;
+        val = 0 - val;
+    }
+
+    let result = "";
+    while val > 0 {
+        let digit = val - ((val / 10) * 10);
+        let ch = "";
+        if digit == 0 { ch = "0"; }
+        if digit == 1 { ch = "1"; }
+        if digit == 2 { ch = "2"; }
+        if digit == 3 { ch = "3"; }
+        if digit == 4 { ch = "4"; }
+        if digit == 5 { ch = "5"; }
+        if digit == 6 { ch = "6"; }
+        if digit == 7 { ch = "7"; }
+        if digit == 8 { ch = "8"; }
+        if digit == 9 { ch = "9"; }
+        result = ch + result;
+        val = val / 10;
+    }
+
+    if neg { return "-" + result; }
+    return result;
+}

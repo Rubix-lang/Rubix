@@ -1,0 +1,22 @@
+# ==============================================================================
+# Rubix Compiler — x86-64 Machine Registers (compiler/legacy/registers.bix)
+# Pure Rubix definitions of x86-64 CPU registers according to Intel SDM.
+# ==============================================================================
+# Legacy machine register constants (reclaimed for UIR)
+# let REG_RAX = 0;
+# let REG_RCX = 1;
+# let REG_RDX = 2;
+# let REG_RBX = 3;
+# let REG_RSP = 4;
+# let REG_RBP = 5;
+# let REG_RSI = 6;
+# let REG_RDI = 7;
+# let REG_R8  = 8;
+# let REG_R9  = 9;
+# let REG_R10 = 10;
+# let REG_R11 = 11;
+# let REG_R12 = 12;
+# let REG_R13 = 13;
+# let REG_R14 = 14;
+# let REG_R15 = 15;
+

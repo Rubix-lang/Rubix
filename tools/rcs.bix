@@ -1,0 +1,164 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Standalone CLI Tool (rubix/tools/rcs.bix)
+# Usage: rcs <command> <file.rcs>
+# Commands:
+#   check   - Parse and validate an .rcs file, report errors
+#   emit    - Parse an .rcs file and emit W3C CSS to stdout
+#   bake    - Parse an .rcs file and bake into a WebStyle (debug dump)
+#   info    - Display token/rule counts and motion verb summary
+# ==============================================================================
+
+include "../std/core.bix";
+include "../std/string.bix";
+include "../std/fs.bix";
+include "../../webbix/ir/types.bix";
+include "../../webbix/ir/style.bix";
+include "../rcs/ast.bix";
+include "../rcs/tokens.bix";
+include "../rcs/motion.bix";
+include "../rcs/lexer.bix";
+include "../rcs/parser.bix";
+include "../rcs/resolver.bix";
+include "../rcs/bake.bix";
+include "../rcs/emit_css.bix";
+
+# --- Read a file into a string buffer ---
+fn rcs_read_file(path: str): str {
+    let fd = file_open(path, 0, 0);
+    if fd < 0 {
+        return "";
+    }
+    let mbuf = sys_mmap_page();
+    let bytes = sys_read(fd, mbuf, 4096);
+    sys_close(fd);
+    if bytes <= 0 {
+        sys_munmap(mbuf, 4096);
+        return "";
+    }
+    let sbuf = alloc_buffer(bytes + 1) as *u8;
+    let i = 0;
+    while i < bytes {
+        sbuf[i] = get_byte(mbuf, i) as u8;
+        i = i + 1;
+    }
+    sbuf[bytes] = 0 as u8;
+    let s = string_from_raw(sbuf);
+    free_buffer(sbuf as ptr, bytes + 1);
+    sys_munmap(mbuf, 4096);
+    return s;
+}
+
+# --- Command: check ---
+fn rcs_cmd_check(src: str, filename: str): i64 {
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    if count == 0 {
+        println("WARN: no rules parsed");
+        free_buffer(rules as ptr, 32768);
+        return 1;
+    }
+
+    println("OK: " + filename + " - " + string_from_int(count) + " rule(s) parsed");
+
+    let i = 0;
+    while i < count {
+        println("  " + rules[i].selector + " -> " + string_from_int(rules[i].decl_count) + " decl(s), " + string_from_int(rules[i].motion_count) + " motion(s)");
+        i = i + 1;
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return 0;
+}
+
+# --- Command: emit ---
+fn rcs_cmd_emit(src: str): i64 {
+    let css = rcs_emit_css(src);
+    println(css);
+    return 0;
+}
+
+# --- Command: bake ---
+fn rcs_cmd_bake(src: str): i64 {
+    let style = alloc_buffer(1024) as *WebStyle;
+    web_style_default(style);
+
+    let count = rcs_bake_style(src, style);
+
+    println("Baked " + string_from_int(count) + " rule(s) into WebStyle:");
+    println("  layout     = " + string_from_int(style.layout));
+    println("  align      = " + string_from_int(style.align));
+    println("  justify    = " + string_from_int(style.justify));
+    println("  gap        = " + string_from_int(style.gap));
+    println("  padding_x  = " + string_from_int(style.padding_x));
+    println("  padding_y  = " + string_from_int(style.padding_y));
+    println("  text_color = " + string_from_int(style.text_color));
+    println("  bg_color   = " + string_from_int(style.bg_color));
+    println("  text_size  = " + string_from_int(style.text_size));
+    println("  weight     = " + string_from_int(style.weight));
+    println("  radius     = " + string_from_int(style.radius));
+    println("  shadow     = " + string_from_int(style.shadow));
+    println("  animation  = " + string_from_int(style.animation));
+    println("  columns    = " + string_from_int(style.columns));
+
+    free_buffer(style as ptr, 1024);
+    return 0;
+}
+
+# --- Command: info ---
+fn rcs_cmd_info(src: str): i64 {
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, 2048);
+
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let rule_count = rcs_parse(src, rules, 64);
+
+    let total_decls = 0;
+    let total_motions = 0;
+    let total_states = 0;
+    let i = 0;
+    while i < rule_count {
+        total_decls = total_decls + rules[i].decl_count;
+        total_motions = total_motions + rules[i].motion_count;
+        if string_length(rules[i].state_condition) > 0 {
+            total_states = total_states + 1;
+        }
+        i = i + 1;
+    }
+
+    println("=== RCS Info ===");
+    println("  Tokens:       " + string_from_int(tok_count));
+    println("  Rules:        " + string_from_int(rule_count));
+    println("  Declarations: " + string_from_int(total_decls));
+    println("  Motions:      " + string_from_int(total_motions));
+    println("  State:        " + string_from_int(total_states));
+
+    free_buffer(tokens as ptr, 32768);
+    free_buffer(rules as ptr, 32768);
+    return 0;
+}
+
+# --- Entry Point ---
+fn main(): i64 {
+    let test_src = rcs_wrap_block(".card", "bg: surface; radius: lg; shadow: md; pad: 16px; pop on hover smooth;") + "\n" + rcs_wrap_block(".title", "size: xl; weight: bold; color: text;");
+
+    println("=== RCS Native Tool ===");
+    println("");
+
+    println("--- CHECK ---");
+    rcs_cmd_check(test_src, "test.rcs");
+    println("");
+
+    println("--- EMIT CSS ---");
+    rcs_cmd_emit(test_src);
+    println("");
+
+    println("--- BAKE ---");
+    rcs_cmd_bake(test_src);
+    println("");
+
+    println("--- INFO ---");
+    rcs_cmd_info(test_src);
+
+    return 0;
+}

@@ -1,0 +1,423 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — UIR to REX Lowering Pipeline
+# File: compiler/rex/rex_lower.bix
+#
+# Lowers hardware-independent Universal UIR into validated REX binary modules.
+# Translates 3-address virtual values to structured REX local value slots.
+# Zero physical register allocation, zero CPU stack frames, zero CPU ABIs.
+# ==============================================================================
+
+
+fn rex_lower_uir_program(uir_buf: i64, code_buf: i64): i64 {
+    let total_nodes = uir_get_count(uir_buf);
+    if total_nodes <= 0 {
+        return -1;
+    }
+
+    # 1. Discover all functions in UIR
+    # func_meta layout: [fi * 8]:
+    #   0: fn_hash
+    #   1: param_count
+    #   2: ret_type
+    #   3: start_node
+    #   4: end_node
+    #   5: max_vreg
+    #   6: body_len (in REX bytes)
+    #   7: reserved
+    let func_meta = sys_mmap(0, 65536, 3, 34, -1, 0);
+    let func_cnt = 0;
+
+    let ni = 0;
+    while ni < total_nodes {
+        let n_addr = uir_node_addr(uir_buf, ni);
+        let op = get_qword(n_addr, 0);
+        if op == 50 { # UIR_FUNCTION_START
+            let fn_hash = get_qword(n_addr, 4);
+            let p_cnt = get_qword(n_addr, 5);
+            let ret_t = get_qword(n_addr, 6);
+            let fn_start = ni;
+            let fn_end = ni + 1;
+            let searching = 1;
+            let max_vr = p_cnt;
+
+            while (fn_end < total_nodes) & (searching == 1) {
+                let chk_addr = uir_node_addr(uir_buf, fn_end);
+                let chk_op = get_qword(chk_addr, 0);
+                if chk_op == 51 { # UIR_FUNCTION_END
+                    searching = 0;
+                } else {
+                    let d = get_qword(chk_addr, 4);
+                    let s1 = get_qword(chk_addr, 5);
+                    let s2 = get_qword(chk_addr, 6);
+                    let fl = get_qword(chk_addr, 2);
+                    if (d >= 0) & (d < 1000) { if d > max_vr { max_vr = d; } }
+                    if (fl & 1) == 0 {
+                        if (s1 >= 0) & (s1 < 1000) { if s1 > max_vr { max_vr = s1; } }
+                    }
+                    if ((fl >> 1) & 1) == 0 {
+                        if (s2 >= 0) & (s2 < 1000) { if s2 > max_vr { max_vr = s2; } }
+                    }
+                    fn_end = fn_end + 1;
+                }
+            }
+
+            set_qword(func_meta, func_cnt * 8 + 0, fn_hash);
+            set_qword(func_meta, func_cnt * 8 + 1, p_cnt);
+            set_qword(func_meta, func_cnt * 8 + 2, ret_t);
+            set_qword(func_meta, func_cnt * 8 + 3, fn_start);
+            set_qword(func_meta, func_cnt * 8 + 4, fn_end);
+            set_qword(func_meta, func_cnt * 8 + 5, max_vr);
+            func_cnt = func_cnt + 1;
+            ni = fn_end;
+        }
+        ni = ni + 1;
+    }
+
+    if func_cnt == 0 {
+        return -2;
+    }
+
+    # Temporary buffer for building sections
+    let sec_types_buf = sys_mmap_page();
+    let sec_funcs_buf = sys_mmap_page();
+    let sec_code_buf  = sys_mmap(0, 1048576, 3, 34, -1, 0);
+    let sec_exp_buf   = sys_mmap_page();
+
+    # 2. Build SEC_TYPES & SEC_FUNCTIONS
+    # Each function gets its type signature: [param_count: u16] [params: u8...] [ret: u8]
+    let tp = 0;
+    tp = rex_emit_u32(sec_types_buf, tp, func_cnt);
+
+    let fp = 0;
+    fp = rex_emit_u32(sec_funcs_buf, fp, func_cnt);
+
+    let fi = 0;
+    while fi < func_cnt {
+        let p_cnt = get_qword(func_meta, fi * 8 + 1);
+        let ret_t = get_qword(func_meta, fi * 8 + 2);
+        tp = rex_emit_u16(sec_types_buf, tp, p_cnt);
+        let pi = 0;
+        while pi < p_cnt {
+            tp = rex_emit_u8(sec_types_buf, tp, REX_TYPE_I64);
+            pi = pi + 1;
+        }
+        let r_code = REX_TYPE_I64;
+        if ret_t == 0 { r_code = REX_TYPE_VOID; }
+        tp = rex_emit_u8(sec_types_buf, tp, r_code);
+
+        # Function descriptor: type_idx = fi, local_count = max_vr + 8 (scratch slots)
+        let max_vr = get_qword(func_meta, fi * 8 + 5);
+        let local_cnt = max_vr + 8;
+        if local_cnt < 8 { local_cnt = 8; }
+        fp = rex_emit_u32(sec_funcs_buf, fp, fi);
+        fp = rex_emit_u16(sec_funcs_buf, fp, local_cnt);
+
+        fi = fi + 1;
+    }
+    let types_len = tp;
+    let funcs_len = fp;
+
+    # 3. Build SEC_CODE
+    let cp = 0;
+    cp = rex_emit_u32(sec_code_buf, cp, func_cnt);
+
+    # Tables for branch label patching within function
+    let label_offsets = sys_mmap_page(); # label_id -> pc
+    let patches = sys_mmap(0, 65536, 3, 34, -1, 0); # [patch_pos, target_label_id]
+    let call_args_buf = sys_mmap_page(); # temporary argument slots for call
+
+    fi = 0;
+    while fi < func_cnt {
+        let fn_start = get_qword(func_meta, fi * 8 + 3);
+        let fn_end = get_qword(func_meta, fi * 8 + 4);
+        let p_cnt = get_qword(func_meta, fi * 8 + 1);
+        let max_vr = get_qword(func_meta, fi * 8 + 5);
+        let scratch_slot = max_vr + 1;
+
+        # Clear label and patch tables
+        let li = 0;
+        while li < 256 {
+            set_qword(label_offsets, li, -1);
+            li = li + 1;
+        }
+        let patch_cnt = 0;
+
+        let body_len_patch_pos = cp;
+        cp = cp + 4; # Reserve 4 bytes for body length
+        let body_start = cp;
+
+        # Instruction Lowering Loop
+        let k = fn_start;
+        while k < fn_end {
+            let addr = uir_node_addr(uir_buf, k);
+            let op = get_qword(addr, 0);
+            let dst = get_qword(addr, 4);
+            let s1 = get_qword(addr, 5);
+            let s2 = get_qword(addr, 6);
+            let fl = get_qword(addr, 2);
+            let imm1 = fl & 1;
+            let imm2 = (fl >> 1) & 1;
+            let extra = get_qword(addr, 7);
+
+            let rel_pc = cp - body_start;
+
+            if op == 52 { # PARAM
+                # Incoming param s1 is in slot s1. If dst != s1, move to dst.
+                if dst != s1 {
+                    cp = rex_enc_move(sec_code_buf, cp, dst, s1);
+                }
+            }
+            if op == 1 { # CONST
+                cp = rex_enc_const_i64(sec_code_buf, cp, dst, s1);
+            }
+            if op == 2 { # MOVE
+                cp = rex_enc_move(sec_code_buf, cp, dst, s1);
+            }
+            if (op >= 10) & (op <= 14) { # ADD, SUB, MUL, DIV, MOD
+                let op_code = REX_OP_ADD_I64;
+                if op == 11 { op_code = REX_OP_SUB_I64; }
+                if op == 12 { op_code = REX_OP_MUL_I64; }
+                if op == 13 { op_code = REX_OP_DIV_I64; }
+                if op == 14 { op_code = REX_OP_MOD_I64; }
+
+                let s2_slot = s2;
+                if imm2 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot, s2);
+                    s2_slot = scratch_slot;
+                }
+                let s1_slot = s1;
+                if imm1 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot + 1, s1);
+                    s1_slot = scratch_slot + 1;
+                }
+                cp = rex_enc_bin_op(sec_code_buf, cp, op_code, dst, s1_slot, s2_slot);
+            }
+            if (op >= 20) & (op <= 25) { # AND, OR, XOR, NOT, SHL, SHR
+                if op == 23 { # NOT
+                    cp = rex_enc_unary_op(sec_code_buf, cp, REX_OP_NOT_I64, dst, s1);
+                } else {
+                    let op_code = REX_OP_AND_I64;
+                    if op == 21 { op_code = REX_OP_OR_I64; }
+                    if op == 22 { op_code = REX_OP_XOR_I64; }
+                    if op == 24 { op_code = REX_OP_SHL_I64; }
+                    if op == 25 { op_code = REX_OP_SHR_I64; }
+
+                    let s2_slot = s2;
+                    if imm2 == 1 {
+                        cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot, s2);
+                        s2_slot = scratch_slot;
+                    }
+                    cp = rex_enc_bin_op(sec_code_buf, cp, op_code, dst, s1, s2_slot);
+                }
+            }
+            if op == 15 { # NEG
+                cp = rex_enc_unary_op(sec_code_buf, cp, REX_OP_NEG_I64, dst, s1);
+            }
+            if (op >= 30) & (op <= 35) { # CMP_EQ..CMP_GE
+                let op_code = REX_OP_CMP_EQ + (op - 30);
+                let s2_slot = s2;
+                if imm2 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot, s2);
+                    s2_slot = scratch_slot;
+                }
+                cp = rex_enc_bin_op(sec_code_buf, cp, op_code, dst, s1, s2_slot);
+            }
+            if op == 53 { # UIR_LABEL
+                let lbl = dst;
+                if lbl < 256 {
+                    set_qword(label_offsets, lbl, rel_pc);
+                }
+            }
+            if op == 54 { # UIR_JUMP
+                let lbl = dst;
+                let tgt = -1;
+                if lbl < 256 { tgt = get_qword(label_offsets, lbl); }
+                if tgt >= 0 {
+                    cp = rex_enc_jump(sec_code_buf, cp, tgt);
+                } else {
+                    # Record forward jump patch: opcode byte (1) + target (4)
+                    let p_pos = cp + 1;
+                    cp = rex_enc_jump(sec_code_buf, cp, 0);
+                    set_qword(patches, patch_cnt * 2 + 0, p_pos);
+                    set_qword(patches, patch_cnt * 2 + 1, lbl);
+                    patch_cnt = patch_cnt + 1;
+                }
+            }
+            if op == 55 { # UIR_BRANCH
+                let lbl_t = dst;
+                let lbl_f = s2;
+                let tgt_t = -1;
+                let tgt_f = -1;
+                if lbl_t < 256 { tgt_t = get_qword(label_offsets, lbl_t); }
+                if lbl_f < 256 { tgt_f = get_qword(label_offsets, lbl_f); }
+
+                let p_pos_t = cp + 3;
+                let p_pos_f = cp + 7;
+                cp = rex_enc_branch(sec_code_buf, cp, s1, 0, 0);
+
+                if tgt_t >= 0 {
+                    rex_emit_u32(sec_code_buf, p_pos_t, tgt_t);
+                } else {
+                    set_qword(patches, patch_cnt * 2 + 0, p_pos_t);
+                    set_qword(patches, patch_cnt * 2 + 1, lbl_t);
+                    patch_cnt = patch_cnt + 1;
+                }
+                if tgt_f >= 0 {
+                    rex_emit_u32(sec_code_buf, p_pos_f, tgt_f);
+                } else {
+                    set_qword(patches, patch_cnt * 2 + 0, p_pos_f);
+                    set_qword(patches, patch_cnt * 2 + 1, lbl_f);
+                    patch_cnt = patch_cnt + 1;
+                }
+            }
+            if op == 58 { # ARG
+                let arg_idx = dst;
+                let arg_slot = s1;
+                if imm1 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot + arg_idx, s1);
+                    arg_slot = scratch_slot + arg_idx;
+                }
+                set_qword(call_args_buf, arg_idx, arg_slot);
+            }
+            if op == 56 { # UIR_CALL
+                let target_fn_hash = s1;
+                let arg_cnt = s2;
+                # Find target function index
+                let target_fidx = -1;
+                let ti = 0;
+                while ti < func_cnt {
+                    if get_qword(func_meta, ti * 8 + 0) == target_fn_hash {
+                        target_fidx = ti;
+                    }
+                    ti = ti + 1;
+                }
+                if target_fidx >= 0 {
+                    cp = rex_enc_call(sec_code_buf, cp, dst, target_fidx, arg_cnt, call_args_buf);
+                } else {
+                    return -3; # Unresolved function call
+                }
+            }
+            if op == 57 { # RETURN
+                let rslot = s1;
+                if imm1 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot, s1);
+                    rslot = scratch_slot;
+                }
+                if s1 == -1 {
+                    rslot = 65535; # Void return
+                }
+                cp = rex_enc_return(sec_code_buf, cp, rslot);
+            }
+            if op == 40 { # ALLOC_STACK
+                cp = rex_enc_alloc_mem(sec_code_buf, cp, scratch_slot, s1);
+            }
+            if op == 41 { # ADDR_OF
+                cp = rex_enc_addr_local(sec_code_buf, cp, dst, s1);
+            }
+            if op == 42 { # UIR_LOAD
+                cp = rex_enc_load64(sec_code_buf, cp, dst, s1, extra);
+            }
+            if op == 43 { # UIR_STORE
+                let val_slot = s2;
+                if imm2 == 1 {
+                    cp = rex_enc_const_i64(sec_code_buf, cp, scratch_slot, s2);
+                    val_slot = scratch_slot;
+                }
+                cp = rex_enc_store64(sec_code_buf, cp, s1, val_slot, extra);
+            }
+
+            k = k + 1;
+        }
+
+        # Backpatch forward jumps in function
+        let pi = 0;
+        while pi < patch_cnt {
+            let p_pos = get_qword(patches, pi * 2 + 0);
+            let lbl = get_qword(patches, pi * 2 + 1);
+            let tgt_pc = get_qword(label_offsets, lbl);
+            if tgt_pc >= 0 {
+                rex_emit_u32(sec_code_buf, p_pos, tgt_pc);
+            } else {
+                rex_emit_u32(sec_code_buf, p_pos, cp - body_start);
+            }
+            pi = pi + 1;
+        }
+
+        # Record body length
+        let body_len = cp - body_start;
+        rex_emit_u32(sec_code_buf, body_len_patch_pos, body_len);
+        set_qword(func_meta, fi * 8 + 6, body_len);
+
+        fi = fi + 1;
+    }
+    let code_len = cp;
+
+    # 4. Build SEC_EXPORTS
+    let ep = 0;
+    ep = rex_emit_u32(sec_exp_buf, ep, func_cnt);
+    fi = 0;
+    while fi < func_cnt {
+        let fn_hash = get_qword(func_meta, fi * 8 + 0);
+        ep = rex_emit_u64(sec_exp_buf, ep, fn_hash);
+        ep = rex_emit_u32(sec_exp_buf, ep, fi);
+        fi = fi + 1;
+    }
+    let exp_len = ep;
+
+    # 5. Assemble all sections into code_buf
+    # Sections to emit: SEC_TYPES, SEC_FUNCTIONS, SEC_MEMORY, SEC_CODE, SEC_EXPORTS
+    let sec_cnt = 5;
+    let mem_sec_len = 8;
+    let total_module_len = 16 + (5 + types_len) + (5 + funcs_len) + (5 + mem_sec_len) + (5 + code_len) + (5 + exp_len);
+
+    let mp = rex_emit_header(code_buf, 0, total_module_len, sec_cnt);
+
+    # SEC_TYPES
+    mp = rex_emit_section_hdr(code_buf, mp, REX_SEC_TYPES, types_len);
+    let i = 0;
+    while i < types_len {
+        set_byte(code_buf, mp + i, get_byte(sec_types_buf, i));
+        i = i + 1;
+    }
+    mp = mp + types_len;
+
+    # SEC_FUNCTIONS
+    mp = rex_emit_section_hdr(code_buf, mp, REX_SEC_FUNCTIONS, funcs_len);
+    i = 0;
+    while i < funcs_len {
+        set_byte(code_buf, mp + i, get_byte(sec_funcs_buf, i));
+        i = i + 1;
+    }
+    mp = mp + funcs_len;
+
+    # SEC_MEMORY (initial 64KB, max 16MB)
+    mp = rex_emit_section_hdr(code_buf, mp, REX_SEC_MEMORY, mem_sec_len);
+    mp = rex_emit_u32(code_buf, mp, 65536);
+    mp = rex_emit_u32(code_buf, mp, 16777216);
+
+    # SEC_CODE
+    mp = rex_emit_section_hdr(code_buf, mp, REX_SEC_CODE, code_len);
+    i = 0;
+    while i < code_len {
+        set_byte(code_buf, mp + i, get_byte(sec_code_buf, i));
+        i = i + 1;
+    }
+    mp = mp + code_len;
+
+    # SEC_EXPORTS
+    mp = rex_emit_section_hdr(code_buf, mp, REX_SEC_EXPORTS, exp_len);
+    i = 0;
+    while i < exp_len {
+        set_byte(code_buf, mp + i, get_byte(sec_exp_buf, i));
+        i = i + 1;
+    }
+    mp = mp + exp_len;
+
+    # 6. Validate the emitted module before returning
+    let v_res = rex_validate_module(code_buf, mp);
+    if v_res != REX_OK {
+        return v_res;
+    }
+
+    return mp;
+}

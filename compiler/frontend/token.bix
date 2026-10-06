@@ -1,0 +1,160 @@
+# token.bix - compiler token kinds, type IDs, and error codes
+
+
+# Token Kind Constants
+let TOKEN_EOF = 0;
+let TOKEN_KW_FN = 1;
+let TOKEN_KW_RETURN = 2;
+let TOKEN_TYPE_I64 = 3;
+let TOKEN_IDENT = 4;
+let TOKEN_INT_LIT = 5;
+let TOKEN_LPAREN = 6;
+let TOKEN_RPAREN = 7;
+let TOKEN_LBRACE = 8;
+let TOKEN_RBRACE = 9;
+let TOKEN_COLON = 10;
+let TOKEN_SEMICOLON = 11;
+
+# Control flow & Operator tokens
+let TOKEN_KW_IF = 12;
+let TOKEN_KW_ELSE = 13;
+let TOKEN_KW_WHILE = 14;
+let TOKEN_KW_LET = 15;
+let TOKEN_PLUS = 16;
+let TOKEN_MINUS = 17;
+let TOKEN_LESS = 18;
+let TOKEN_GREATER = 19;
+let TOKEN_EQUAL_EQUAL = 20;
+let TOKEN_NOT_EQUAL = 21;
+let TOKEN_EQUAL = 22;
+let TOKEN_COMMA = 23;
+let TOKEN_STR_LIT = 24;
+let TOKEN_STAR = 25;
+let TOKEN_SLASH = 26;
+let TOKEN_PERCENT = 27;
+let TOKEN_LESS_EQ = 28;
+let TOKEN_GREATER_EQ = 29;
+let TOKEN_AMP = 30;
+let TOKEN_PIPE = 31;
+let TOKEN_CARET = 32;
+let TOKEN_SHL = 33;
+let TOKEN_SHR = 34;
+
+# Phase 3 Type Tokens
+let TOKEN_TYPE_I32 = 35;
+let TOKEN_TYPE_U8 = 36;
+let TOKEN_TYPE_BOOL = 37;
+let TOKEN_TYPE_PTR = 38;
+let TOKEN_TYPE_VOID = 39;
+let TOKEN_KW_TRUE = 40;
+let TOKEN_KW_FALSE = 41;
+let TOKEN_LBRACKET = 42;
+let TOKEN_RBRACKET = 43;
+let TOKEN_KW_AS = 44;
+let TOKEN_KW_NULL = 45;
+let TOKEN_TYPE_STR = 46;
+let TOKEN_KW_STRUCT = 47;
+let TOKEN_DOT = 48;
+let TOKEN_BANG = 49;
+let TOKEN_KW_BREAK = 50;
+let TOKEN_KW_CONTINUE = 51;
+let TOKEN_TILDE = 52;
+let TOKEN_PIPE_GREATER = 53;
+let TOKEN_QUESTION = 54;
+let TOKEN_KW_FOR = 55;
+let TOKEN_DOT_DOT = 57;
+let TOKEN_QUESTION_COLON = 58;
+let TOKEN_KW_MATCH = 59;
+let TOKEN_FAT_ARROW = 60;
+let TOKEN_UNDERSCORE = 61;
+let TOKEN_KW_DEFER = 62;
+let TOKEN_KW_OR = 63;
+let TOKEN_KW_ENUM = 64;
+let TOKEN_FLOAT_LIT = 65;
+let TOKEN_TYPE_F64 = 66;
+let TOKEN_TYPE_F32 = 67;
+let TOKEN_PLUS_TRAP = 68;
+let TOKEN_PLUS_SAT  = 69;
+let TOKEN_MINUS_TRAP = 70;
+let TOKEN_MINUS_SAT  = 71;
+let TOKEN_STAR_TRAP  = 72;
+let TOKEN_STAR_SAT   = 73;
+let TOKEN_CHAR_LIT   = 74;
+let TOKEN_TYPE_CHAR  = 75;
+let TOKEN_QUESTION_DOT = 76;
+let TOKEN_QUESTION_QUESTION = 77;
+let TOKEN_KW_CONST = 78;
+let TOKEN_KW_TYPE = 79;
+let TOKEN_KW_MUT = 80;
+
+let TOKEN_ERROR = 99;
+
+# Canonical Type Identifiers (understood across AST, sema, symbol table, TIR, emitter)
+let TYPE_NONE = 0;
+let TYPE_I64  = 1;
+let TYPE_I32  = 2;
+let TYPE_U8   = 3;
+let TYPE_BOOL = 4;
+let TYPE_PTR  = 5;
+let TYPE_VOID = 6;
+let TYPE_INT_LIT = 7;
+let TYPE_STR  = 8;
+let TYPE_ARRAY = 9;
+let TYPE_F64 = 10;
+let TYPE_F32 = 11;
+let TYPE_FLOAT_LIT = 12;
+let TYPE_CHAR = 13;
+let TYPE_OPTION = 14;
+let TYPE_RESULT = 15;
+let TYPE_TUPLE = 16;
+let TYPE_GENERIC_PARAM = 17;
+let TYPE_STRUCT = 100;
+
+# Pointer Provenance Constants
+let PROV_UNKNOWN     = 0; # External, parameter, heap, or unknown provenance
+let PROV_STACK_LOCAL = 1; # Local stack object address (&local_var)
+
+# Canonical Deterministic Compiler Error Codes:
+# 1. Frontend Syntax, Identifier & Lexical Errors
+#   ERR_SYNTAX             = -1; # Grammar/syntax expectation failure
+#   ERR_UNDEFINED_IDENT    = -2; # Undefined identifier / variable out of scope
+#   ERR_INVALID_TOKEN      = -3; # Malformed / unrecognized token (TOKEN_ERROR)
+# 2. Driver & I/O Errors
+#   ERR_FILE_OPEN          = -10; # Failed file open (sys_open < 0)
+#   ERR_FILE_READ          = -11; # Failed file read or empty file (sys_read_all <= 0)
+#   ERR_COMPILE_FAILED     = -12; # Generic compilation failure fallback (code_len == 0)
+#   ERR_OUT_FILE_OPEN      = -20; # Output file open failure
+#   ERR_OUT_FILE_WRITE     = -21; # Output file write failure
+# 3. Symbol Table & Limit Errors
+#   ERR_CONST_TABLE_FULL   = -30;
+#   ERR_VAR_TABLE_FULL     = -31;
+#   ERR_FUNC_TABLE_FULL    = -32;
+#   ERR_PATCH_TABLE_FULL   = -33;
+#   ERR_EPILOGUE_PATCH_FULL = -34;
+# 4. Semantic & Type System Errors
+#   ERR_ARG_COUNT_MISMATCH = -35;
+#   ERR_TOO_MANY_ARGS      = -36;
+#   ERR_UNKNOWN_TYPE       = -37;
+#   ERR_TYPE_MISMATCH_ASSIGN = -40;
+#   ERR_TYPE_MISMATCH_RETURN = -41;
+#   ERR_TYPE_MISMATCH_ARG    = -42;
+#   ERR_INVALID_BIN_OP_TYPE  = -43;
+#   ERR_INVALID_PTR_OP       = -44;
+#   ERR_VOID_EXPR_USED       = -45;
+#   ERR_STACK_ESCAPE         = -46;
+#   ERR_INVALID_PTR_DEREF    = -47;
+#   ERR_INVALID_CAST         = -48;
+#   ERR_INVALID_MAIN         = -49;
+#   ERR_INVALID_ARRAY_SIZE   = -50;
+#   ERR_UNKNOWN_FIELD        = -51;
+#   ERR_BREAK_OUTSIDE_LOOP   = -52;
+#   ERR_CONTINUE_OUTSIDE_LOOP = -53;
+#   ERR_MAIN_NOT_FOUND       = -54;
+
+fn token_set(tok_buf: i64, kind: i64, val: i64, offset: i64, len: i64): i64 {
+    set_qword(tok_buf, 0, kind);
+    set_qword(tok_buf, 1, val);
+    set_qword(tok_buf, 2, offset);
+    set_qword(tok_buf, 3, len);
+    return 0;
+}

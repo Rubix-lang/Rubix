@@ -1,0 +1,65 @@
+# ==============================================================================
+# Rubix Universal Machine Synthesis (RUMS) — Target Machine Description
+# Target Architecture: Synthetic Abstract Test Machine
+# Proves target independence & generic machine model consumption without hardcoding.
+# ==============================================================================
+
+target synthetic {
+    machine_format_version: 1;
+    word_size: 4;
+    endianness: little;
+    stack_alignment: 8;
+    stack_direction: down;
+    instruction_width: 4;
+    pc_relative_calls: true;
+}
+
+# ------------------------------------------------------------------------------
+# Physical Register File (4 general purpose registers)
+# ------------------------------------------------------------------------------
+registers {
+    reg 0  rA  return_val  false  general;
+    reg 1  rB  arg1        false  general;
+    reg 2  rC  arg2        false  general;
+    reg 3  rD  scratch     false  general;
+}
+
+# ------------------------------------------------------------------------------
+# Calling Convention: Synthetic Standard ABI
+# ------------------------------------------------------------------------------
+calling_convention standard {
+    args: [rB, rC];
+    return_reg: rA;
+    scratch_pool: [rA, rB, rC, rD];
+    preserved_pool: [];
+    stack_entry_disp: 8;
+}
+
+# ------------------------------------------------------------------------------
+# Instruction Patterns & Encodings
+# ------------------------------------------------------------------------------
+patterns {
+    pattern MOV_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x01000000 | (REG_ID(src) << 8) | REG_ID(dst);
+    }
+
+    pattern ADD_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x02000000 | (REG_ID(src2) << 16) | (REG_ID(src1) << 8) | REG_ID(dst);
+    }
+
+    pattern SUB_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x03000000 | (REG_ID(src2) << 16) | (REG_ID(src1) << 8) | REG_ID(dst);
+    }
+
+    pattern RET() {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x0F000000;
+    }
+}

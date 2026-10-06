@@ -1,0 +1,36 @@
+# Basic syntax, immutable/mutable variables, and functions in Rubix.
+# Run with: rubix run examples/01_basics.bix
+
+# Functions start with `fn`, followed by parameters and return type.
+fn add(a: Integer, b: Integer): Integer {
+    # The last expression in a function is automatically returned.
+    a + b
+}
+
+fn main(): Integer {
+    # Variables declared with `let` are immutable (read-only constants).
+    # Once assigned, you cannot change their value.
+    let name = "Rubix"
+    let year = 2026
+
+    # Variables declared with `mut` are mutable (can be updated).
+    mut counter = 0
+    counter = counter + 1
+    counter = counter + 5
+
+    # Calling a function and storing the result
+    let result = add(10, 25)
+
+    
+    # `print` outputs both strings and numbers directly to stdout
+    print "Language:"
+    print name
+    print "Year:"
+    print year
+    print "Counter:"
+    print counter
+    print "10 + 25 = "
+    print result
+
+    0
+}

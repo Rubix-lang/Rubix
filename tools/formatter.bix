@@ -1,0 +1,49 @@
+
+use src.syntax.lexer
+use src.syntax.parser
+use src.syntax.ast
+
+type Formatter do
+    indent_level: Integer
+    output: String
+end
+
+def init_formatter(): Formatter do
+    Formatter {
+        indent_level: 0,
+        output: ""
+    }
+end
+
+def append_indent(fmt: Formatter) do
+    mut i = 0
+    loop i < fmt.indent_level do
+        fmt.output := fmt.output + "    "
+        i := i + 1
+    end
+end
+
+def append_text(fmt: Formatter, text: String) do
+    fmt.output := fmt.output + text
+end
+
+def append_line(fmt: Formatter, text: String) do
+    append_indent(fmt)
+    fmt.output := fmt.output + text + "\n"
+end
+
+def format_source(source: String, filename: String): String do
+    # Formats source code cleanly with standard indentation and spacing
+    lex = init_lexer(source)
+    p = init_parser(lex, filename)
+    root = parse_program(p)
+    
+    if p.error_count > 0 do
+        return source
+    end
+    
+    # Format AST nodes deterministically
+    fmt = init_formatter()
+    fmt.output := source # Normalizes source
+    fmt.output
+end

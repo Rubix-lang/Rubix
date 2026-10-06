@@ -1,0 +1,9 @@
+fn main(): Integer {
+    let b = not true
+    print "not true:"
+    print b
+    let c = not false
+    print "not false:"
+    print c
+    0
+}

@@ -1,0 +1,18 @@
+# Test heap expansion invalidating earlier allocations
+fn main(): Integer {
+    print "Allocating p1 (30 MB)..."
+    let p1 = alloc(30000000)
+    set_byte_at(p1, 0, 42)
+    print "p1 allocated and written"
+    
+    print "Allocating p2 (40 MB) - this should trigger heap expansion..."
+    let p2 = alloc(40000000)
+    set_byte_at(p2, 0, 99)
+    print "p2 allocated and written"
+    
+    print "Accessing p1 again after heap expansion..."
+    let val = get_byte_at(p1, 0)
+    print "Read p1 value:"
+    print val
+    0
+}

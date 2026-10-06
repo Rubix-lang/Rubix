@@ -1,0 +1,81 @@
+{
+  "name": "rubix-lang",
+  "displayName": "Rubix Language Support",
+  "description": "Official IDE language support for the Rubix programming language (*.bix)",
+  "version": "1.0.0",
+  "publisher": "rubix-lang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rubix-lang/rubix"
+  },
+  "icon": "icons/rubix-logo.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "rubix",
+    "bix",
+    "systems",
+    "compiler",
+    "aot",
+    "performance"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rubix",
+        "aliases": [
+          "Rubix",
+          "rubix",
+          "bix"
+        ],
+        "extensions": [
+          ".bix"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/rubix-icon.png",
+          "dark": "./icons/rubix-icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rubix",
+        "scopeName": "source.rubix",
+        "path": "./syntaxes/rubix.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "rubix",
+        "path": "./snippets/rubix.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "rubix.build",
+        "title": "Rubix: Build Standalone Native Executable"
+      },
+      {
+        "command": "rubix.run",
+        "title": "Rubix: Run Active File"
+      },
+      {
+        "command": "rubix.format",
+        "title": "Rubix: Format Document"
+      },
+      {
+        "command": "rubix.doctor",
+        "title": "Rubix: Run Doctor Subsystem Health Check"
+      }
+    ]
+  }
+}

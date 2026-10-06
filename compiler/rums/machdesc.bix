@@ -1,0 +1,1381 @@
+# machdesc.bix - target machine description loader and architecture query API
+
+
+# ------------------------------------------------------------------------------
+# Byte Emission Primitives (Architecture-Agnostic)
+# ------------------------------------------------------------------------------
+fn mach_emit_byte(buf: i64, p: i64, b: i64): i64 {
+    set_byte(buf, p, b & 255);
+    return p + 1;
+}
+
+fn mach_emit_u32(buf: i64, p: i64, w: i64): i64 {
+    set_byte(buf, p + 0, w & 255);
+    set_byte(buf, p + 1, (w >> 8) & 255);
+    set_byte(buf, p + 2, (w >> 16) & 255);
+    set_byte(buf, p + 3, (w >> 24) & 255);
+    return p + 4;
+}
+
+fn mach_emit_disp32(buf: i64, p: i64, v: i64): i64 {
+    return mach_emit_u32(buf, p, v);
+}
+
+fn mach_read_u32(buf: i64, p: i64): i64 {
+    let b0 = get_byte(buf, p + 0);
+    let b1 = get_byte(buf, p + 1);
+    let b2 = get_byte(buf, p + 2);
+    let b3 = get_byte(buf, p + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn riscv_encode_jal(rd: i64, disp: i64): i64 {
+    let imm20 = (disp >> 20) & 1;
+    let imm10_1 = (disp >> 1) & 1023;
+    let imm11 = (disp >> 11) & 1;
+    let imm19_12 = (disp >> 12) & 255;
+    let imm_bits = (imm20 << 31) | (imm10_1 << 21) | (imm11 << 20) | (imm19_12 << 12);
+    return imm_bits | (rd << 7) | 111;
+}
+
+fn riscv_encode_bne(s1: i64, s2: i64, disp: i64): i64 {
+    let imm12 = (disp >> 12) & 1;
+    let imm10_5 = (disp >> 5) & 63;
+    let imm4_1 = (disp >> 1) & 15;
+    let imm11 = (disp >> 11) & 1;
+    let imm_bits = (imm12 << 31) | (imm10_5 << 25) | (imm4_1 << 8) | (imm11 << 7);
+    return imm_bits | (s2 << 20) | (s1 << 15) | (1 << 12) | 99;
+}
+
+# ------------------------------------------------------------------------------
+# String & Identifier Helper
+# ------------------------------------------------------------------------------
+fn mach_tok_eq(buf: i64, s: str): i64 {
+    let slen = string_length(s);
+    let i = 0;
+    while i < slen {
+        if get_byte(buf, i) != (s[i] as i64) { return 0; }
+        i = i + 1;
+    }
+    if get_byte(buf, slen) != 0 { return 0; }
+    return 1;
+}
+
+fn mach_str_copy(dst: i64, src: i64): i64 {
+    let i = 0;
+    while i < 15 {
+        let b = get_byte(src, i);
+        set_byte(dst, i, b);
+        if b == 0 { return i; }
+        i = i + 1;
+    }
+    set_byte(dst, 15, 0);
+    return 15;
+}
+
+fn mach_find_reg_id(names_buf: i64, reg_count: i64, name_tok: i64): i64 {
+    let i = 0;
+    while i < reg_count {
+        let entry = names_buf + (i * 16);
+        let is_match = 1;
+        let p = 0;
+        while (p < 16) & (is_match == 1) {
+            let b1 = get_byte(entry, p);
+            let b2 = get_byte(name_tok, p);
+            if b1 != b2 { is_match = 0; }
+            if (b1 == 0) & (b2 == 0) { p = 16; }
+            p = p + 1;
+        }
+        if is_match == 1 { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+# ------------------------------------------------------------------------------
+# Lexer / Tokenizer for .machine Syntax
+# ------------------------------------------------------------------------------
+fn mach_is_delim(b: i64): i64 {
+    if (b == 32) | (b == 9) | (b == 10) | (b == 13) { return 1; }
+    if (b == 59) | (b == 58) | (b == 44) { return 1; } # ';' ':' ','
+    if (b == 123) | (b == 125) { return 1; } # '{' '}'
+    if (b == 91) | (b == 93) { return 1; } # '[' ']'
+    if (b == 40) | (b == 41) { return 1; } # '(' ')'
+    return 0;
+}
+
+fn mach_next_token(src: i64, pos: i64, len: i64, tok_buf: i64, tok_info: i64): i64 {
+    let p = pos;
+    # Skip whitespace and comments
+    let running = 1;
+    while running == 1 {
+        if p >= len {
+            set_byte(tok_buf, 0, 0);
+            set_qword(tok_info, 0, 0); # EOF
+            return len;
+        }
+        let b = get_byte(src, p);
+        if (b == 32) | (b == 9) | (b == 10) | (b == 13) {
+            p = p + 1;
+        } else {
+            if b == 35 { # '#' comment
+                p = p + 1;
+                while (p < len) & (get_byte(src, p) != 10) {
+                    p = p + 1;
+                }
+            } else {
+                running = 0;
+            }
+        }
+    }
+
+    if p >= len {
+        set_byte(tok_buf, 0, 0);
+        set_qword(tok_info, 0, 0);
+        return len;
+    }
+
+    let b = get_byte(src, p);
+
+    # Single-char punctuation
+    if (b == 59) | (b == 58) | (b == 44) | (b == 123) | (b == 125) | (b == 91) | (b == 93) | (b == 40) | (b == 41) {
+        set_byte(tok_buf, 0, b);
+        set_byte(tok_buf, 1, 0);
+        set_qword(tok_info, 0, b);
+        return p + 1;
+    }
+
+    # Word or Number
+    let wp = 0;
+    let is_num = 1;
+    if (b < 48) | (b > 57) { is_num = 0; }
+
+    while p < len {
+        let cb = get_byte(src, p);
+        if (mach_is_delim(cb) == 1) | (cb == 35) {
+            # Delimiter reached
+            set_byte(tok_buf, wp, 0);
+            if is_num == 1 {
+                set_qword(tok_info, 0, 2); # NUMBER
+            } else {
+                set_qword(tok_info, 0, 1); # IDENT
+            }
+            return p;
+        }
+        if wp < 31 {
+            set_byte(tok_buf, wp, cb);
+            wp = wp + 1;
+        }
+        p = p + 1;
+    }
+
+    set_byte(tok_buf, wp, 0);
+    if is_num == 1 {
+        set_qword(tok_info, 0, 2);
+    } else {
+        set_qword(tok_info, 0, 1);
+    }
+    return p;
+}
+
+fn mach_parse_int(tok_buf: i64): i64 {
+    let v = 0;
+    let i = 0;
+    if (get_byte(tok_buf, 0) == 48) & ((get_byte(tok_buf, 1) == 120) | (get_byte(tok_buf, 1) == 88)) {
+        i = 2;
+        while get_byte(tok_buf, i) != 0 {
+            let b = get_byte(tok_buf, i);
+            let d = -1;
+            if (b >= 48) & (b <= 57) { d = b - 48; }
+            if (b >= 65) & (b <= 70) { d = b - 65 + 10; }
+            if (b >= 97) & (b <= 102) { d = b - 97 + 10; }
+            if d >= 0 {
+                v = (v << 4) | d;
+            } else {
+                return v;
+            }
+            i = i + 1;
+        }
+        return v;
+    }
+    while get_byte(tok_buf, i) != 0 {
+        let b = get_byte(tok_buf, i);
+        if (b >= 48) & (b <= 57) {
+            v = v * 10 + (b - 48);
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+# ------------------------------------------------------------------------------
+# Model Buffer Initialization & Parsing
+# ------------------------------------------------------------------------------
+fn machdesc_init(model: i64): i64 {
+    # Zero model page (4096 bytes)
+    let i = 0;
+    while i < 512 {
+        set_qword(model, i, 0);
+        i = i + 1;
+    }
+    set_qword(model, 0, 1296122696); # Magic: 0x4D414348 ("MACH")
+    set_qword(model, 7, 1);          # Default version = 1
+    set_qword(model, 13, -1);        # No link register default
+    return 0;
+}
+
+fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
+    machdesc_init(model);
+
+    let tok_buf = sys_mmap_page();
+    let tok_info = sys_mmap_page();
+    let names_buf = sys_mmap_page(); # register names storage (32 * 16 bytes)
+
+    let p = 0;
+    while p < src_len {
+        p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+        let kind = get_qword(tok_info, 0);
+        if kind == 0 { p = src_len; } # EOF
+
+        # 1. Section: target <name> { ... }
+        if (kind == 1) & (mach_tok_eq(tok_buf, "target") == 1) {
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # target name
+            let tid = 0;
+            if mach_tok_eq(tok_buf, "x86_64") == 1 {
+                tid = 1;
+                set_qword(model, 15, 4);  # sp_reg = rsp (4)
+                set_qword(model, 17, 1);  # target_type = CPU (1)
+                set_qword(model, 18, 1);  # regalloc_required = 1
+                set_qword(model, 19, 1);  # machine_frame_required = 1
+                set_qword(model, 20, 1);  # output_format = ELF (1)
+                set_qword(model, 21, 11); # scratch_reg = r11 (11)
+            }
+            if mach_tok_eq(tok_buf, "arm64") == 1 {
+                tid = 2;
+                set_qword(model, 15, 31); # sp_reg = x31 (31)
+                set_qword(model, 17, 1);  # target_type = CPU (1)
+                set_qword(model, 18, 1);  # regalloc_required = 1
+                set_qword(model, 19, 1);  # machine_frame_required = 1
+                set_qword(model, 20, 1);  # output_format = ELF (1)
+                set_qword(model, 21, 16); # scratch_reg = x16 (16)
+                set_qword(model, 80, 0);
+                set_qword(model, 81, 5);
+                set_qword(model, 82, 16);
+                set_qword(model, 83, 3596551104);
+                set_qword(model, 84, 2852127712);
+                set_qword(model, 85, 3531603968);
+                set_qword(model, 86, 2);
+                set_qword(model, 87, 2847898621);
+                set_qword(model, 88, 2432697341);
+                set_qword(model, 95, 2);
+                set_qword(model, 96, 2831252477);
+                set_qword(model, 97, 3596551104);
+            }
+            if mach_tok_eq(tok_buf, "riscv64") == 1 {
+                tid = 3;
+                set_qword(model, 15, 2);  # sp_reg = x2 (2)
+                set_qword(model, 17, 1);  # target_type = CPU (1)
+                set_qword(model, 18, 1);  # regalloc_required = 1
+                set_qword(model, 19, 1);  # machine_frame_required = 1
+                set_qword(model, 20, 1);  # output_format = ELF (1)
+                set_qword(model, 21, 31); # scratch_reg = x31 (31)
+                set_qword(model, 80, 7);
+                set_qword(model, 81, 15);
+                set_qword(model, 82, 20);
+                set_qword(model, 83, 32871);
+                set_qword(model, 84, 19);
+                set_qword(model, 85, 19);
+                set_qword(model, 86, 4);
+                set_qword(model, 87, 4279238931);
+                set_qword(model, 88, 16909475);
+                set_qword(model, 89, 8522787);
+                set_qword(model, 90, 16843027);
+                set_qword(model, 95, 4);
+                set_qword(model, 96, 8523827);
+                set_qword(model, 97, 135303);
+                set_qword(model, 98, 16843027);
+                set_qword(model, 99, 32871);
+            }
+            if mach_tok_eq(tok_buf, "rex") == 1 {
+                tid = 4;
+                set_qword(model, 15, 0); # sp_reg = 0
+                set_qword(model, 17, 2); # target_type = PORTABLE (2)
+                set_qword(model, 18, 0); # regalloc_required = 0
+                set_qword(model, 19, 0); # machine_frame_required = 0
+                set_qword(model, 20, 2); # output_format = REX (2)
+                set_qword(model, 21, 0); # scratch_reg = 0
+            }
+            if mach_tok_eq(tok_buf, "synthetic") == 1 {
+                tid = 99;
+                set_qword(model, 15, 5); # sp_reg = 5
+                set_qword(model, 17, 1); # target_type = CPU (1)
+                set_qword(model, 18, 1); # regalloc_required = 1
+                set_qword(model, 19, 0); # machine_frame_required = 0
+                set_qword(model, 20, 3); # output_format = RAW (3)
+                set_qword(model, 21, 4); # scratch_reg = 4
+                set_qword(model, 80, 0);
+                set_qword(model, 81, 8);
+                set_qword(model, 82, 16);
+                set_qword(model, 83, 251658240);
+                set_qword(model, 84, 16777216);
+                set_qword(model, 85, 67108864);
+                set_qword(model, 86, 0);
+                set_qword(model, 95, 0);
+            }
+            set_qword(model, 1, tid);
+
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
+            let in_target = 1;
+            while (p < src_len) & (in_target == 1) {
+                p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                if get_qword(tok_info, 0) == 125 { # '}'
+                    in_target = 0;
+                } else {
+                    if mach_tok_eq(tok_buf, "word_size") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                        set_qword(model, 2, mach_parse_int(tok_buf));
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+                    if mach_tok_eq(tok_buf, "machine_format_version") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                        set_qword(model, 7, mach_parse_int(tok_buf));
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+                    if mach_tok_eq(tok_buf, "stack_alignment") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                        set_qword(model, 4, mach_parse_int(tok_buf));
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+                    if mach_tok_eq(tok_buf, "instruction_width") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                        set_qword(model, 6, mach_parse_int(tok_buf));
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+                }
+            }
+        }
+
+        # 2. Section: registers { reg <id> <name> <role> <callee_saved> <class>; ... }
+        if (kind == 1) & (mach_tok_eq(tok_buf, "registers") == 1) {
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
+            let in_regs = 1;
+            while (p < src_len) & (in_regs == 1) {
+                p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                if get_qword(tok_info, 0) == 125 { # '}'
+                    in_regs = 0;
+                } else {
+                    if mach_tok_eq(tok_buf, "reg") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # id
+                        let rid = mach_parse_int(tok_buf);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # name
+                        mach_str_copy(names_buf + (rid * 16), tok_buf);
+
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # role
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # callee_saved
+                        let cs = 0;
+                        if mach_tok_eq(tok_buf, "true") == 1 { cs = 1; }
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # class
+                        let cls = 0;
+                        if mach_tok_eq(tok_buf, "special") == 1 { cls = 1; }
+                        if (mach_tok_eq(tok_buf, "vector") == 1) | (mach_tok_eq(tok_buf, "simd") == 1) { cls = 2; }
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+
+                        # Record register in model
+                        let rcnt = get_qword(model, 8);
+                        if rid >= rcnt { set_qword(model, 8, rid + 1); }
+                        let rbase = model + 1024 + (rid * 32);
+                        set_qword(rbase, 0, rid);
+                        set_qword(rbase, 2, cs);
+                        set_qword(rbase, 3, cls);
+                    }
+                }
+            }
+        }
+
+        # 3. Section: calling_convention <name> { ... }
+        if (kind == 1) & (mach_tok_eq(tok_buf, "calling_convention") == 1) {
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # name
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
+            let in_cc = 1;
+            while (p < src_len) & (in_cc == 1) {
+                p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                if get_qword(tok_info, 0) == 125 { # '}'
+                    in_cc = 0;
+                } else {
+                    if mach_tok_eq(tok_buf, "args") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '['
+                        let arg_cnt = 0;
+                        let in_args = 1;
+                        while (p < src_len) & (in_args == 1) {
+                            p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                            if get_qword(tok_info, 0) == 93 { # ']'
+                                in_args = 0;
+                            } else {
+                                if get_qword(tok_info, 0) != 44 { # not comma
+                                    let rid = mach_find_reg_id(names_buf, get_qword(model, 8), tok_buf);
+                                    if rid >= 0 {
+                                        set_qword(model, 32 + arg_cnt, rid);
+                                        arg_cnt = arg_cnt + 1;
+                                    }
+                                }
+                            }
+                        }
+                        set_qword(model, 9, arg_cnt);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+
+                    if mach_tok_eq(tok_buf, "return_reg") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # reg name
+                        let rid = mach_find_reg_id(names_buf, get_qword(model, 8), tok_buf);
+                        set_qword(model, 10, rid);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+
+                    if mach_tok_eq(tok_buf, "scratch_pool") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '['
+                        let sc_cnt = 0;
+                        let in_pool = 1;
+                        while (p < src_len) & (in_pool == 1) {
+                            p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                            if get_qword(tok_info, 0) == 93 { # ']'
+                                in_pool = 0;
+                            } else {
+                                if get_qword(tok_info, 0) != 44 { # not comma
+                                    let rid = mach_find_reg_id(names_buf, get_qword(model, 8), tok_buf);
+                                    if rid >= 0 {
+                                        set_qword(model, 48 + sc_cnt, rid);
+                                        sc_cnt = sc_cnt + 1;
+                                    }
+                                }
+                            }
+                        }
+                        set_qword(model, 11, sc_cnt);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+
+                    if mach_tok_eq(tok_buf, "link_register") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # reg name
+                        let rid = mach_find_reg_id(names_buf, get_qword(model, 8), tok_buf);
+                        set_qword(model, 13, rid);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+
+                    if mach_tok_eq(tok_buf, "frame_pointer") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # reg name
+                        let rid = mach_find_reg_id(names_buf, get_qword(model, 8), tok_buf);
+                        set_qword(model, 14, rid);
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                    }
+                }
+            }
+        }
+
+        # 4. Section: patterns { pattern <name>(...) { cost: N; ... } ... }
+        if (kind == 1) & (mach_tok_eq(tok_buf, "patterns") == 1) {
+            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
+            let in_pats = 1;
+            while (p < src_len) & (in_pats == 1) {
+                p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                if get_qword(tok_info, 0) == 125 { # '}'
+                    in_pats = 0;
+                } else {
+                    if mach_tok_eq(tok_buf, "pattern") == 1 {
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # pattern name
+                        let pat_id = 0;
+                        if mach_tok_eq(tok_buf, "MOV_REG_REG") == 1 { pat_id = 1; }
+                        if (mach_tok_eq(tok_buf, "MOV_REG_IMM") == 1) | (mach_tok_eq(tok_buf, "MOV_REG_IMM64") == 1) { pat_id = 2; }
+                        if mach_tok_eq(tok_buf, "ADD_REG_REG") == 1 { pat_id = 10; }
+                        if mach_tok_eq(tok_buf, "SUB_REG_REG") == 1 { pat_id = 11; }
+                        if mach_tok_eq(tok_buf, "AND_REG_REG") == 1 { pat_id = 20; }
+                        if (mach_tok_eq(tok_buf, "OR_REG_REG") == 1) | (mach_tok_eq(tok_buf, "ORR_REG_REG") == 1) { pat_id = 21; }
+                        if (mach_tok_eq(tok_buf, "XOR_REG_REG") == 1) | (mach_tok_eq(tok_buf, "EOR_REG_REG") == 1) { pat_id = 22; }
+                        if mach_tok_eq(tok_buf, "RET") == 1 { pat_id = 57; }
+                        if mach_tok_eq(tok_buf, "VEC_FMA") == 1 { pat_id = 70; }
+                        if mach_tok_eq(tok_buf, "VEC_DOT") == 1 { pat_id = 71; }
+                        if mach_tok_eq(tok_buf, "VEC_ADD") == 1 { pat_id = 72; }
+                        if mach_tok_eq(tok_buf, "VEC_MUL") == 1 { pat_id = 73; }
+
+                        # Skip parameter list: (...)
+                        while (p < src_len) & (get_qword(tok_info, 0) != 41) { # ')'
+                            p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                        }
+
+                        p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
+                        let pat_cost = 1;
+                        let pat_lat = 1;
+                        let pat_enc = 0;
+                        let in_pat = 1;
+                        while (p < src_len) & (in_pat == 1) {
+                            p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                            if get_qword(tok_info, 0) == 125 { # '}'
+                                in_pat = 0;
+                            } else {
+                                if mach_tok_eq(tok_buf, "cost") == 1 {
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                                    pat_cost = mach_parse_int(tok_buf);
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                                }
+                                if mach_tok_eq(tok_buf, "latency") == 1 {
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                                    pat_lat = mach_parse_int(tok_buf);
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ';'
+                                }
+                                if mach_tok_eq(tok_buf, "encoding_u32") == 1 {
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
+                                    p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
+                                    pat_enc = mach_parse_int(tok_buf);
+                                    while (p < src_len) & (get_qword(tok_info, 0) != 59) {
+                                        p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                                    }
+                                }
+                            }
+                        }
+
+                        # Store pattern in model
+                        let pcnt = get_qword(model, 16);
+                        let pbase = model + 2048 + (pcnt * 64);
+                        set_qword(pbase, 0, pat_id);
+                        set_qword(pbase, 1, pat_cost);
+                        set_qword(pbase, 2, pat_lat);
+                        set_qword(pbase, 3, pat_enc);
+                        set_qword(model, 16, pcnt + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+# ------------------------------------------------------------------------------
+# Model Validation
+# ------------------------------------------------------------------------------
+fn machdesc_validate(model: i64): i64 {
+    if get_qword(model, 0) != 1296122696 { return -10; } # Bad magic
+    if get_qword(model, 7) != 1 { return -10; }          # Unsupported version
+    let wsz = get_qword(model, 2);
+    if (wsz != 4) & (wsz != 8) { return -11; }           # Unsupported word size
+    let ttype = get_qword(model, 17);
+    if ttype == 2 {
+        # Portable target (e.g. REX): validated!
+        return 0;
+    }
+    let rcnt = get_qword(model, 8);
+    if rcnt <= 0 { return -12; }                         # No registers
+    let ret_reg = get_qword(model, 10);
+    if (ret_reg < 0) | (ret_reg >= rcnt) { return -14; } # Invalid return register
+    let sc_cnt = get_qword(model, 11);
+    if sc_cnt <= 0 { return -15; }                       # Empty scratch pool
+    let pcnt = get_qword(model, 16);
+    if pcnt <= 0 { return -16; }                         # No patterns
+    return 0;                                            # Valid!
+}
+
+fn mach_read_all(fd: i64, buf: i64, max_len: i64): i64 {
+    if fd < 0 { return -10; }
+    if max_len <= 0 { return 0; }
+    let total = 0;
+    let running = 1;
+    while running == 1 {
+        let remaining = max_len - total;
+        if remaining <= 0 {
+            running = 0;
+        } else {
+            let n = sys_read(fd, buf + total, remaining);
+            if n == 0 {
+                running = 0;
+            } else {
+                if n < 0 {
+                    if n == -4 {
+                        # EINTR: retry
+                    } else {
+                        return n;
+                    }
+                } else {
+                    total = total + n;
+                }
+            }
+        }
+    }
+    return total;
+}
+
+# ------------------------------------------------------------------------------
+# High-Level File Loader
+# ------------------------------------------------------------------------------
+fn machdesc_load_file(path_ptr: i64, model: i64): i64 {
+    let fd = sys_open(path_ptr, 0, 0);
+    if fd < 0 {
+        return -1; # File not found
+    }
+    let file_buf = sys_mmap(0, 65536, 3, 34, -1, 0);
+    let n = mach_read_all(fd, file_buf, 65536);
+    sys_close(fd);
+    if n <= 0 {
+        return -2; # Read failed or empty
+    }
+    set_byte(file_buf, n, 0);
+
+    let parse_res = machdesc_parse(file_buf, n, model);
+    if parse_res < 0 {
+        return parse_res;
+    }
+
+    let val_res = machdesc_validate(model);
+    if val_res < 0 {
+        return val_res;
+    }
+
+    return 0;
+}
+
+# ------------------------------------------------------------------------------
+# Target Machine Query API
+# ------------------------------------------------------------------------------
+fn mach_model_get_target_id(model: i64): i64 {
+    return get_qword(model, 1);
+}
+
+fn mach_model_get_target_type(model: i64): i64 {
+    return get_qword(model, 17);
+}
+
+fn mach_model_needs_regalloc(model: i64): i64 {
+    return get_qword(model, 18);
+}
+
+fn mach_model_needs_machine_frame(model: i64): i64 {
+    return get_qword(model, 19);
+}
+
+fn mach_model_get_output_format(model: i64): i64 {
+    return get_qword(model, 20);
+}
+
+fn mach_model_get_sp_reg(model: i64): i64 {
+    return get_qword(model, 15);
+}
+
+fn mach_model_get_scratch_reg(model: i64): i64 {
+    return get_qword(model, 21);
+}
+
+fn mach_model_get_word_size(model: i64): i64 {
+    return get_qword(model, 2);
+}
+
+fn mach_model_get_instruction_width(model: i64): i64 {
+    return get_qword(model, 6);
+}
+
+fn mach_model_get_reg_count(model: i64): i64 {
+    return get_qword(model, 8);
+}
+
+fn mach_model_get_scratch_pool(model: i64, pool_buf: i64): i64 {
+    let cnt = get_qword(model, 11);
+    let i = 0;
+    while i < cnt {
+        set_qword(pool_buf, i, get_qword(model, 48 + i));
+        i = i + 1;
+    }
+    return cnt;
+}
+
+fn mach_model_get_abi_arg_reg(model: i64, arg_idx: i64): i64 {
+    let cnt = get_qword(model, 9);
+    if (arg_idx >= 0) & (arg_idx < cnt) {
+        return get_qword(model, 32 + arg_idx);
+    }
+    return -1;
+}
+
+fn mach_model_get_abi_return_reg(model: i64): i64 {
+    return get_qword(model, 10);
+}
+
+fn mach_model_pattern_cost(model: i64, pat_id: i64): i64 {
+    let pcnt = get_qword(model, 16);
+    let i = 0;
+    while i < pcnt {
+        let pbase = model + 2048 + (i * 64);
+        if get_qword(pbase, 0) == pat_id {
+            return get_qword(pbase, 1);
+        }
+        i = i + 1;
+    }
+    return 1; # Default cost 1
+}
+
+fn mach_model_pattern_encoding(model: i64, pat_id: i64): i64 {
+    let pcnt = get_qword(model, 16);
+    let i = 0;
+    while i < pcnt {
+        let pbase = model + 2048 + (i * 64);
+        if get_qword(pbase, 0) == pat_id {
+            return get_qword(pbase, 3);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ------------------------------------------------------------------------------
+# Model-Driven Machine Byte Synthesis
+# ------------------------------------------------------------------------------
+fn x86_rex(w: i64, r: i64, b: i64): i64 {
+    let rex = 64;
+    if w == 1 { rex = rex | 8; }
+    if r >= 8 { rex = rex | 4; }
+    if b >= 8 { rex = rex | 1; }
+    return rex;
+}
+
+fn mach_model_emit_prologue(model: i64, code_buf: i64, cur: i64, frame_sz: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        let p = mach_emit_u32(code_buf, cur, 2847898621); # STP x29, x30, [sp, #-16]!
+        p = mach_emit_u32(code_buf, p, 2432697341);       # MOV x29, sp
+        if frame_sz > 0 {
+            p = mach_emit_u32(code_buf, p, 3506438144 | ((frame_sz & 4095) << 10) | (31 << 5) | 31);
+        }
+        return p;
+    }
+    if tid == 3 {
+        let sz = frame_sz;
+        if sz < 16 { sz = 16; }
+        let addi_sp = 19 | (((0 - sz) & 4095) << 20) | (2 << 15) | (2 << 7);
+        let p = mach_emit_u32(code_buf, cur, addi_sp);
+        let off_ra = sz - 8;
+        let sd_ra = 35 | (((off_ra >> 5) & 127) << 25) | (1 << 20) | (2 << 15) | (3 << 12) | ((off_ra & 31) << 7);
+        p = mach_emit_u32(code_buf, p, sd_ra);
+        let off_s0 = sz - 16;
+        let sd_s0 = 35 | (((off_s0 >> 5) & 127) << 25) | (8 << 20) | (2 << 15) | (3 << 12) | ((off_s0 & 31) << 7);
+        p = mach_emit_u32(code_buf, p, sd_s0);
+        let addi_s0 = 19 | ((sz & 4095) << 20) | (2 << 15) | (8 << 7);
+        p = mach_emit_u32(code_buf, p, addi_s0);
+        return p;
+    }
+    if tid == 99 {
+        return cur;
+    }
+    # x86-64
+    let p = cur;
+    p = mach_emit_byte(code_buf, p, 85);
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 229);
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 129); p = mach_emit_byte(code_buf, p, 236);
+    p = mach_emit_disp32(code_buf, p, frame_sz);
+    return p;
+}
+
+fn mach_model_emit_epilogue(model: i64, code_buf: i64, cur: i64, frame_sz: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        let p = cur;
+        if frame_sz > 0 {
+            p = mach_emit_u32(code_buf, p, 2432696320 | ((frame_sz & 4095) << 10) | (31 << 5) | 31);
+        }
+        p = mach_emit_u32(code_buf, p, 2831252477); # LDP x29, x30, [sp], #16
+        p = mach_emit_u32(code_buf, p, 3596551104); # RET
+        return p;
+    }
+    if tid == 3 {
+        let sz = frame_sz;
+        if sz < 16 { sz = 16; }
+        let off_s0 = sz - 16;
+        let ld_s0 = 3 | ((off_s0 & 4095) << 20) | (2 << 15) | (3 << 12) | (8 << 7);
+        let p = mach_emit_u32(code_buf, cur, ld_s0);
+        let off_ra = sz - 8;
+        let ld_ra = 3 | ((off_ra & 4095) << 20) | (2 << 15) | (3 << 12) | (1 << 7);
+        p = mach_emit_u32(code_buf, p, ld_ra);
+        let addi_sp = 19 | ((sz & 4095) << 20) | (2 << 15) | (2 << 7);
+        p = mach_emit_u32(code_buf, p, addi_sp);
+        p = mach_emit_u32(code_buf, p, 32871); # RET
+        return p;
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 251658240);
+    }
+    # x86-64
+    let p = cur;
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 236);
+    p = mach_emit_byte(code_buf, p, 93);
+    p = mach_emit_byte(code_buf, p, 195);
+    return p;
+}
+
+fn mach_model_emit_bin_op(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64, s1: i64, s2: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        if op == 10 { return mach_emit_u32(code_buf, cur, 2332033024 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 11 { return mach_emit_u32(code_buf, cur, 3405774848 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 12 { return mach_emit_u32(code_buf, cur, 2600500224 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 20 { return mach_emit_u32(code_buf, cur, 2315255808 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 21 { return mach_emit_u32(code_buf, cur, 2852126720 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 22 { return mach_emit_u32(code_buf, cur, 3388997632 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 24 { return mach_emit_u32(code_buf, cur, 2596282368 | (s2 << 16) | (s1 << 5) | dst); }
+        if op == 25 { return mach_emit_u32(code_buf, cur, 2596284416 | (s2 << 16) | (s1 << 5) | dst); }
+    }
+    if tid == 3 {
+        if op == 10 { return mach_emit_u32(code_buf, cur, 51 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 11 { return mach_emit_u32(code_buf, cur, 1073741875 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 12 { return mach_emit_u32(code_buf, cur, 33554483 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 20 { return mach_emit_u32(code_buf, cur, 28723 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 21 { return mach_emit_u32(code_buf, cur, 24627 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 22 { return mach_emit_u32(code_buf, cur, 16435 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 24 { return mach_emit_u32(code_buf, cur, 4147 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 25 { return mach_emit_u32(code_buf, cur, 1073762355 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+    }
+    if tid == 99 {
+        let base_op = mach_model_pattern_encoding(model, op);
+        if base_op == 0 {
+            if op == 10 { base_op = 33554432; }
+            if op == 11 { base_op = 50331648; }
+        }
+        let dst_shift = get_qword(model, 80);
+        let s1_shift = get_qword(model, 81);
+        let s2_shift = get_qword(model, 82);
+        let word = base_op | (s2 << s2_shift) | (s1 << s1_shift) | (dst << dst_shift);
+        return mach_emit_u32(code_buf, cur, word);
+    }
+    # x86-64
+    let p = cur;
+    let s2_reg = s2;
+    if dst == s2 {
+        # Commutative: ADD(10), IMUL(12), AND(20), OR(21), XOR(22)
+        if (op == 10) | (op == 12) | (op == 20) | (op == 21) | (op == 22) {
+            if op == 12 { # IMUL
+                p = mach_emit_byte(code_buf, p, x86_rex(1, dst, s1));
+                p = mach_emit_byte(code_buf, p, 15);
+                p = mach_emit_byte(code_buf, p, 175);
+                p = mach_emit_byte(code_buf, p, 192 + ((dst & 7) * 8) + (s1 & 7));
+                return p;
+            }
+            let opcode_byte = 1;
+            if op == 20 { opcode_byte = 33; }
+            if op == 21 { opcode_byte = 9;  }
+            if op == 22 { opcode_byte = 49; }
+            p = mach_emit_byte(code_buf, p, x86_rex(1, s1, dst));
+            p = mach_emit_byte(code_buf, p, opcode_byte);
+            p = mach_emit_byte(code_buf, p, 192 + ((s1 & 7) * 8) + (dst & 7));
+            return p;
+        }
+        # Non-commutative (SUB, SHL, SAR): save s2 into scratch reg 11
+        p = mach_emit_byte(code_buf, p, x86_rex(1, s2, 11));
+        p = mach_emit_byte(code_buf, p, 137);
+        p = mach_emit_byte(code_buf, p, 192 + ((s2 & 7) * 8) + 3);
+        s2_reg = 11;
+    }
+
+    if dst != s1 {
+        p = mach_emit_byte(code_buf, p, x86_rex(1, s1, dst));
+        p = mach_emit_byte(code_buf, p, 137);
+        p = mach_emit_byte(code_buf, p, 192 + ((s1 & 7) * 8) + (dst & 7));
+    }
+    if op == 12 { # IMUL
+        p = mach_emit_byte(code_buf, p, x86_rex(1, dst, s2_reg));
+        p = mach_emit_byte(code_buf, p, 15);
+        p = mach_emit_byte(code_buf, p, 175);
+        p = mach_emit_byte(code_buf, p, 192 + ((dst & 7) * 8) + (s2_reg & 7));
+        return p;
+    }
+    if (op == 24) | (op == 25) { # SHL, SAR
+        let modrm_shift = 224;
+        if op == 25 { modrm_shift = 248; }
+        if dst == 1 {
+            if s2_reg != 1 {
+                p = mach_emit_byte(code_buf, p, x86_rex(1, 1, 11));
+                p = mach_emit_byte(code_buf, p, 137);
+                p = mach_emit_byte(code_buf, p, 203); # mov r11, rcx
+                p = mach_emit_byte(code_buf, p, x86_rex(1, s2_reg, 1));
+                p = mach_emit_byte(code_buf, p, 137);
+                p = mach_emit_byte(code_buf, p, 192 + ((s2_reg & 7) * 8) + 1); # mov rcx, s2_reg
+                p = mach_emit_byte(code_buf, p, x86_rex(1, 0, 11));
+                p = mach_emit_byte(code_buf, p, 211);
+                p = mach_emit_byte(code_buf, p, modrm_shift + 3); # shl/sar r11, cl
+                p = mach_emit_byte(code_buf, p, x86_rex(1, 11, 1));
+                p = mach_emit_byte(code_buf, p, 137);
+                p = mach_emit_byte(code_buf, p, 217); # mov rcx, r11
+                return p;
+            }
+        }
+        if s2_reg != 1 {
+            p = mach_emit_byte(code_buf, p, 81); # push rcx (51)
+            p = mach_emit_byte(code_buf, p, x86_rex(1, s2_reg, 1));
+            p = mach_emit_byte(code_buf, p, 137);
+            p = mach_emit_byte(code_buf, p, 192 + ((s2_reg & 7) * 8) + 1);
+            p = mach_emit_byte(code_buf, p, x86_rex(1, 0, dst));
+            p = mach_emit_byte(code_buf, p, 211);
+            p = mach_emit_byte(code_buf, p, modrm_shift + (dst & 7));
+            p = mach_emit_byte(code_buf, p, 89); # pop rcx (59)
+            return p;
+        }
+        p = mach_emit_byte(code_buf, p, x86_rex(1, 0, dst));
+        p = mach_emit_byte(code_buf, p, 211);
+        p = mach_emit_byte(code_buf, p, modrm_shift + (dst & 7));
+        return p;
+    }
+    let opcode_byte = 1;
+    if op == 11 { opcode_byte = 41; }
+    if op == 20 { opcode_byte = 33; }
+    if op == 21 { opcode_byte = 9;  }
+    if op == 22 { opcode_byte = 49; }
+    p = mach_emit_byte(code_buf, p, x86_rex(1, s2_reg, dst));
+    p = mach_emit_byte(code_buf, p, opcode_byte);
+    p = mach_emit_byte(code_buf, p, 192 + ((s2_reg & 7) * 8) + (dst & 7));
+    return p;
+}
+
+fn mach_model_emit_mov_reg(model: i64, code_buf: i64, cur: i64, dst: i64, src: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 2852127712 | (src << 16) | dst);
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, 19 | (src << 15) | (dst << 7));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 16777216 | (src << 8) | dst);
+    }
+    let p = cur;
+    p = mach_emit_byte(code_buf, p, x86_rex(1, src, dst));
+    p = mach_emit_byte(code_buf, p, 137);
+    p = mach_emit_byte(code_buf, p, 192 + ((src & 7) * 8) + (dst & 7));
+    return p;
+}
+
+fn mach_model_emit_mov_imm(model: i64, code_buf: i64, cur: i64, dst: i64, imm: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        if imm < 0 {
+            let inv16 = (0 - imm - 1) & 65535;
+            return mach_emit_u32(code_buf, cur, 2457862144 | (inv16 << 5) | dst);
+        }
+        let imm16 = imm & 65535;
+        return mach_emit_u32(code_buf, cur, 3531603968 | (imm16 << 5) | dst);
+    }
+    if tid == 3 {
+        let imm12 = imm & 4095;
+        return mach_emit_u32(code_buf, cur, 19 | (imm12 << 20) | (dst << 7));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 67108864 | ((dst & 255) << 24) | (imm & 16777215));
+    }
+    if imm == 0 {
+        let p = cur;
+        if dst >= 8 {
+            p = mach_emit_byte(code_buf, p, x86_rex(0, dst, dst));
+        }
+        p = mach_emit_byte(code_buf, p, 49); # 0x31: xor r/m32, r32
+        p = mach_emit_byte(code_buf, p, 192 + ((dst & 7) * 8) + (dst & 7));
+        return p;
+    }
+    let p = cur;
+    p = mach_emit_byte(code_buf, p, x86_rex(1, 0, dst));
+    p = mach_emit_byte(code_buf, p, 184 + (dst & 7));
+    p = mach_emit_u32(code_buf, p, imm & 4294967295);
+    p = mach_emit_u32(code_buf, p, (imm >> 32) & 4294967295);
+    return p;
+}
+
+fn mach_model_emit_return(model: i64, code_buf: i64, cur: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 3596551104);
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, 32871);
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 251658240);
+    }
+    return mach_emit_byte(code_buf, cur, 195);
+}
+
+fn mach_model_emit_div_mod(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64, s1: i64, s2: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        if op == 13 {
+            return mach_emit_u32(code_buf, cur, 2596277248 | (s2 << 16) | (s1 << 5) | dst);
+        }
+        if op == 14 {
+            let p = mach_emit_u32(code_buf, cur, 2596277248 | (s2 << 16) | (s1 << 5) | 16);
+            return mach_emit_u32(code_buf, p, 2600501248 | (s2 << 16) | (s1 << 10) | (16 << 5) | dst);
+        }
+    }
+    if tid == 3 {
+        if op == 13 {
+            return mach_emit_u32(code_buf, cur, 33570867 | (s2 << 20) | (s1 << 15) | (dst << 7));
+        }
+        if op == 14 {
+            return mach_emit_u32(code_buf, cur, 33579059 | (s2 << 20) | (s1 << 15) | (dst << 7));
+        }
+    }
+    if tid == 99 {
+        if op == 13 { return mach_emit_u32(code_buf, cur, 201326592 | (s2 << 16) | (s1 << 8) | dst); }
+        if op == 14 { return mach_emit_u32(code_buf, cur, 218103808 | (s2 << 16) | (s1 << 8) | dst); }
+    }
+    let p = cur;
+    let divisor = s2;
+    if (s2 == 0) | (s2 == 2) {
+        p = mach_model_emit_mov_reg(model, code_buf, p, 11, s2);
+        divisor = 11;
+    }
+    if s1 != 0 { p = mach_model_emit_mov_reg(model, code_buf, p, 0, s1); }
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 153);
+    p = mach_emit_byte(code_buf, p, x86_rex(1, 0, divisor));
+    p = mach_emit_byte(code_buf, p, 247);
+    p = mach_emit_byte(code_buf, p, 248 + (divisor & 7));
+    if op == 13 {
+        if dst != 0 { p = mach_model_emit_mov_reg(model, code_buf, p, dst, 0); }
+    } else {
+        if dst != 2 { p = mach_model_emit_mov_reg(model, code_buf, p, dst, 2); }
+    }
+    return p;
+}
+
+fn mach_model_emit_unary_op(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64, s1: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        if op == 15 { return mach_emit_u32(code_buf, cur, 3405775840 | (s1 << 16) | dst); }
+        if op == 23 { return mach_emit_u32(code_buf, cur, 2854224864 | (s1 << 16) | dst); }
+    }
+    if tid == 3 {
+        if op == 15 { return mach_emit_u32(code_buf, cur, 1073741875 | (s1 << 20) | (dst << 7)); }
+        if op == 23 { return mach_emit_u32(code_buf, cur, 4293935123 | (s1 << 15) | (dst << 7)); }
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 234881024 | (op << 24) | (s1 << 8) | dst);
+    }
+    let p = cur;
+    if dst != s1 { p = mach_model_emit_mov_reg(model, code_buf, p, dst, s1); }
+    p = mach_emit_byte(code_buf, p, x86_rex(1, 0, dst));
+    p = mach_emit_byte(code_buf, p, 247);
+    if op == 15 { p = mach_emit_byte(code_buf, p, 216 + (dst & 7)); }
+    if op == 23 { p = mach_emit_byte(code_buf, p, 208 + (dst & 7)); }
+    return p;
+}
+
+fn mach_model_emit_cmp(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64, s1: i64, s2: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        let p = mach_emit_u32(code_buf, cur, 3942645791 | (s2 << 16) | (s1 << 5));
+        let cond_inv = 0;
+        if op == 30 { cond_inv = 1; }
+        if op == 31 { cond_inv = 0; }
+        if op == 32 { cond_inv = 10; }
+        if op == 33 { cond_inv = 12; }
+        if op == 34 { cond_inv = 13; }
+        if op == 35 { cond_inv = 11; }
+        return mach_emit_u32(code_buf, p, 2594113504 | (cond_inv << 12) | dst);
+    }
+    if tid == 3 {
+        if op == 32 { return mach_emit_u32(code_buf, cur, 8243 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
+        if op == 34 { return mach_emit_u32(code_buf, cur, 8243 | (s1 << 20) | (s2 << 15) | (dst << 7)); }
+        if op == 30 {
+            let p = mach_emit_u32(code_buf, cur, 1073741875 | (s2 << 20) | (s1 << 15) | (dst << 7));
+            return mach_emit_u32(code_buf, p, 1060883 | (dst << 15) | (dst << 7));
+        }
+        if op == 31 {
+            let p = mach_emit_u32(code_buf, cur, 1073741875 | (s2 << 20) | (s1 << 15) | (dst << 7));
+            return mach_emit_u32(code_buf, p, 12339 | (dst << 20) | (dst << 7));
+        }
+        if op == 35 {
+            let p = mach_emit_u32(code_buf, cur, 8243 | (s2 << 20) | (s1 << 15) | (dst << 7));
+            return mach_emit_u32(code_buf, p, 1064979 | (dst << 15) | (dst << 7));
+        }
+        if op == 33 {
+            let p = mach_emit_u32(code_buf, cur, 8243 | (s1 << 20) | (s2 << 15) | (dst << 7));
+            return mach_emit_u32(code_buf, p, 1064979 | (dst << 15) | (dst << 7));
+        }
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 83886080 | ((op - 30) << 20) | (s2 << 16) | (s1 << 8) | dst);
+    }
+    let p = cur;
+    p = mach_emit_byte(code_buf, p, x86_rex(1, s2, s1));
+    p = mach_emit_byte(code_buf, p, 57);
+    p = mach_emit_byte(code_buf, p, 192 + ((s2 & 7) * 8) + (s1 & 7));
+    let setcc = 148;
+    if op == 31 { setcc = 149; }
+    if op == 32 { setcc = 156; }
+    if op == 33 { setcc = 158; }
+    if op == 34 { setcc = 159; }
+    if op == 35 { setcc = 157; }
+    p = mach_emit_byte(code_buf, p, x86_rex(0, 0, dst));
+    p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, setcc);
+    p = mach_emit_byte(code_buf, p, 192 + (dst & 7));
+    p = mach_emit_byte(code_buf, p, x86_rex(1, dst, dst));
+    p = mach_emit_byte(code_buf, p, 15);
+    p = mach_emit_byte(code_buf, p, 182);
+    p = mach_emit_byte(code_buf, p, 192 + ((dst & 7) * 8) + (dst & 7));
+    return p;
+}
+
+fn mach_model_emit_jump(model: i64, code_buf: i64, cur: i64, disp: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 335544320 | ((disp >> 2) & 67108863));
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, riscv_encode_jal(0, disp));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 100663296 | (disp & 16777215));
+    }
+    let p = mach_emit_byte(code_buf, cur, 233);
+    let rel = disp;
+    if disp != 0 {
+        rel = disp - 5;
+    }
+    return mach_emit_disp32(code_buf, p, rel);
+}
+
+fn mach_model_emit_branch_cond(model: i64, code_buf: i64, cur: i64, s1: i64, disp_t: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 3036676096 | (((disp_t >> 2) & 524287) << 5) | s1);
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, riscv_encode_bne(s1, 0, disp_t));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 117440512 | (s1 << 16) | (disp_t & 65535));
+    }
+    let p = mach_emit_byte(code_buf, cur, x86_rex(1, s1, s1));
+    p = mach_emit_byte(code_buf, p, 133);
+    p = mach_emit_byte(code_buf, p, 192 + ((s1 & 7) * 8) + (s1 & 7));
+    p = mach_emit_byte(code_buf, p, 15);
+    p = mach_emit_byte(code_buf, p, 133);
+    let rel = disp_t;
+    if disp_t != 0 {
+        rel = disp_t - 9;
+    }
+    return mach_emit_disp32(code_buf, p, rel);
+}
+
+fn mach_model_emit_call(model: i64, code_buf: i64, cur: i64, disp: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 2483027968 | ((disp >> 2) & 67108863));
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, riscv_encode_jal(1, disp));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 134217728 | (disp & 16777215));
+    }
+    let p = mach_emit_byte(code_buf, cur, 232);
+    let rel = disp;
+    if disp != 0 {
+        rel = disp - 5;
+    }
+    return mach_emit_disp32(code_buf, p, rel);
+}
+
+fn mach_model_emit_load(model: i64, code_buf: i64, cur: i64, dst: i64, base: i64, disp: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 4181721088 | (((disp >> 3) & 4095) << 10) | (base << 5) | dst);
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, 12291 | ((disp & 4095) << 20) | (base << 15) | (dst << 7));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 150994944 | ((disp & 255) << 16) | (base << 8) | dst);
+    }
+    let p = mach_emit_byte(code_buf, cur, x86_rex(1, dst, base));
+    p = mach_emit_byte(code_buf, p, 139);
+    if (base & 7) == 4 {
+        p = mach_emit_byte(code_buf, p, 128 + ((dst & 7) * 8) + 4);
+        p = mach_emit_byte(code_buf, p, 36);
+    } else {
+        p = mach_emit_byte(code_buf, p, 128 + ((dst & 7) * 8) + (base & 7));
+    }
+    return mach_emit_disp32(code_buf, p, disp);
+}
+
+fn mach_model_emit_store(model: i64, code_buf: i64, cur: i64, base: i64, disp: i64, src: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 4177526784 | (((disp >> 3) & 4095) << 10) | (base << 5) | src);
+    }
+    if tid == 3 {
+        return mach_emit_u32(code_buf, cur, 12323 | (((disp >> 5) & 127) << 25) | (src << 20) | (base << 15) | ((disp & 31) << 7));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 167772160 | ((disp & 255) << 24) | (src << 16) | (base << 8));
+    }
+    let p = mach_emit_byte(code_buf, cur, x86_rex(1, src, base));
+    p = mach_emit_byte(code_buf, p, 137);
+    if (base & 7) == 4 {
+        p = mach_emit_byte(code_buf, p, 128 + ((src & 7) * 8) + 4);
+        p = mach_emit_byte(code_buf, p, 36);
+    } else {
+        p = mach_emit_byte(code_buf, p, 128 + ((src & 7) * 8) + (base & 7));
+    }
+    return mach_emit_disp32(code_buf, p, disp);
+}
+
+fn mach_model_emit_addr_of(model: i64, code_buf: i64, cur: i64, dst: i64, slot_idx: i64): i64 {
+    let disp = (slot_idx + 1) * 8;
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        return mach_emit_u32(code_buf, cur, 3506438144 | ((disp & 4095) << 10) | (29 << 5) | dst);
+    }
+    if tid == 3 {
+        let neg_disp = (0 - disp) & 4095;
+        return mach_emit_u32(code_buf, cur, 19 | (neg_disp << 20) | (8 << 15) | (dst << 7));
+    }
+    if tid == 99 {
+        return mach_emit_u32(code_buf, cur, 184549376 | (slot_idx << 8) | dst);
+    }
+    let p = mach_emit_byte(code_buf, cur, x86_rex(1, dst, 0));
+    p = mach_emit_byte(code_buf, p, 141);
+    p = mach_emit_byte(code_buf, p, 128 + ((dst & 7) * 8) + 5);
+    return mach_emit_disp32(code_buf, p, 0 - disp);
+}
+
+fn mach_model_emit_startup(model: i64, code_buf: i64, cur: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        let p = mach_emit_u32(code_buf, cur, 2483027968);     # BL main
+        p = mach_emit_u32(code_buf, p, 3531606952);           # MOVZ x8, 93
+        p = mach_emit_u32(code_buf, p, 3556769793);           # SVC #0
+        p = mach_emit_u32(code_buf, p, 3573751839);           # NOP
+        return p;
+    }
+    if tid == 3 {
+        let p = mach_emit_u32(code_buf, cur, 239);            # JAL ra, main
+        p = mach_emit_u32(code_buf, p, 97519763);             # ADDI a7, zero, 93
+        p = mach_emit_u32(code_buf, p, 115);                  # ECALL
+        p = mach_emit_u32(code_buf, p, 19);                   # NOP
+        return p;
+    }
+    if tid == 99 {
+        let p = mach_emit_u32(code_buf, cur, 134217728);      # CALL main
+        p = mach_emit_u32(code_buf, p, 251658240);            # RET
+        p = mach_emit_u32(code_buf, p, 0);
+        p = mach_emit_u32(code_buf, p, 0);
+        return p;
+    }
+    # x86-64 Dual-Entry Startup:
+    # Offset 0..4: In-memory execution entry jump: jmp main (E9 rel32)
+    let p = mach_emit_byte(code_buf, cur, 233);
+    p = mach_emit_disp32(code_buf, p, 0);
+    # Offset 5..31: Standalone ELF process startup (_start):
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 49); p = mach_emit_byte(code_buf, p, 237); # xor rbp, rbp
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 139); p = mach_emit_byte(code_buf, p, 60); p = mach_emit_byte(code_buf, p, 36); # mov rdi, [rsp]
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 141); p = mach_emit_byte(code_buf, p, 116); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 8); # lea rsi, [rsp+8]
+    p = mach_emit_byte(code_buf, p, 232); # call main
+    p = mach_emit_disp32(code_buf, p, 0);
+    p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 199); # mov rdi, rax
+    p = mach_emit_byte(code_buf, p, 184); p = mach_emit_disp32(code_buf, p, 60); # mov eax, 60 (sys_exit)
+    p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, 5); # syscall
+    return p;
+}
+
+fn mach_model_backpatch(model: i64, code_buf: i64, patch_pos: i64, target_pos: i64): i64 {
+    let tid = get_qword(model, 1);
+    if tid == 2 {
+        let word = mach_read_u32(code_buf, patch_pos);
+        let hi6 = (word >> 26) & 63;
+        let disp = target_pos - patch_pos;
+        if hi6 == 5 {
+            let new_w = 335544320 | ((disp >> 2) & 67108863);
+            mach_emit_u32(code_buf, patch_pos, new_w);
+            return 1;
+        }
+        if hi6 == 37 {
+            let new_w = 2483027968 | ((disp >> 2) & 67108863);
+            mach_emit_u32(code_buf, patch_pos, new_w);
+            return 1;
+        }
+        let hi8 = (word >> 24) & 255;
+        if hi8 == 181 {
+            let rt = word & 31;
+            let new_w = 3036676096 | (((disp >> 2) & 524287) << 5) | rt;
+            mach_emit_u32(code_buf, patch_pos, new_w);
+            return 1;
+        }
+        return 0;
+    }
+    if tid == 3 {
+        let word = mach_read_u32(code_buf, patch_pos);
+        let op7 = word & 127;
+        let disp = target_pos - patch_pos;
+        if op7 == 111 {
+            let rd = (word >> 7) & 31;
+            let new_w = riscv_encode_jal(rd, disp);
+            mach_emit_u32(code_buf, patch_pos, new_w);
+            return 1;
+        }
+        if op7 == 99 {
+            let s1 = (word >> 15) & 31;
+            let s2 = (word >> 20) & 31;
+            let new_w = riscv_encode_bne(s1, s2, disp);
+            mach_emit_u32(code_buf, patch_pos, new_w);
+            return 1;
+        }
+        return 0;
+    }
+    if tid == 99 {
+        let word = mach_read_u32(code_buf, patch_pos);
+        let op8 = (word >> 24) & 255;
+        let disp = target_pos - patch_pos;
+        if op8 == 6 {
+            mach_emit_u32(code_buf, patch_pos, 100663296 | (disp & 16777215));
+            return 1;
+        }
+        if op8 == 7 {
+            let s1 = (word >> 16) & 255;
+            mach_emit_u32(code_buf, patch_pos, 117440512 | (s1 << 16) | (disp & 65535));
+            return 1;
+        }
+        if op8 == 8 {
+            mach_emit_u32(code_buf, patch_pos, 134217728 | (disp & 16777215));
+            return 1;
+        }
+        return 0;
+    }
+    # x86-64
+    if patch_pos == 0 {
+        # Backpatch both in-memory jmp main (offset 1) and _start call main (offset 18)
+        let disp_jmp = target_pos - 5;
+        mach_emit_disp32(code_buf, 1, disp_jmp);
+        let disp_call = target_pos - 22;
+        mach_emit_disp32(code_buf, 18, disp_call);
+        return 1;
+    }
+    let first_b = get_byte(code_buf, patch_pos);
+    if first_b == 233 { # JMP rel32 (5 bytes)
+        let disp = target_pos - (patch_pos + 5);
+        mach_emit_disp32(code_buf, patch_pos + 1, disp);
+        return 1;
+    }
+    if first_b == 232 { # CALL rel32 (5 bytes)
+        let disp = target_pos - (patch_pos + 5);
+        mach_emit_disp32(code_buf, patch_pos + 1, disp);
+        return 1;
+    }
+    if (first_b >= 64) & (first_b <= 79) { # REX prefix before TEST + JNZ
+        let disp = target_pos - (patch_pos + 9);
+        mach_emit_disp32(code_buf, patch_pos + 5, disp);
+        return 1;
+    }
+    let disp = target_pos - (patch_pos + 4);
+    mach_emit_disp32(code_buf, patch_pos, disp);
+    return 1;
+}

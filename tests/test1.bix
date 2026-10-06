@@ -1,0 +1,15 @@
+use std.collections;
+use std.memory;
+
+fn test1(): i64 {
+    let x: Result = Ok(42);
+    match x {
+        Ok(v) => v,
+        Err(_) => 0
+    }
+}
+
+fn main(): i64 {
+    print test1();
+    0
+}

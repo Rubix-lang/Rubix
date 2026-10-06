@@ -1,0 +1,134 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Theme & Property Aliases (rubix/rcs/tokens.bix)
+# Embedded White Theme tokens and kid-friendly alias lookups.
+# ==============================================================================
+
+fn str_eq(a: str, b: str): bool {
+    return string_equal(a, b);
+}
+
+fn rcs_lbrace(): str {
+    let buf = alloc_buffer(2) as *u8;
+    buf[0] = 123 as u8;
+    buf[1] = 0 as u8;
+    let s = string_from_raw(buf);
+    free_buffer(buf as ptr, 2);
+    return s;
+}
+
+fn rcs_rbrace(): str {
+    let buf = alloc_buffer(2) as *u8;
+    buf[0] = 125 as u8;
+    buf[1] = 0 as u8;
+    let s = string_from_raw(buf);
+    free_buffer(buf as ptr, 2);
+    return s;
+}
+
+fn rcs_wrap_block(selector: str, body: str): str {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    return selector + " " + lb + " " + body + " " + rb;
+}
+
+# --- Canonical Property Alias Mapping ---
+fn rcs_map_property(alias: str): str {
+    if str_eq(alias, "bg") { return "background"; }
+    if str_eq(alias, "radius") | str_eq(alias, "rounded") { return "border-radius"; }
+    if str_eq(alias, "size") | str_eq(alias, "text-size") { return "font-size"; }
+    if str_eq(alias, "weight") | str_eq(alias, "text-weight") { return "font-weight"; }
+    if str_eq(alias, "pad") | str_eq(alias, "p") { return "padding"; }
+    if str_eq(alias, "m") { return "margin"; }
+    if str_eq(alias, "shadow") | str_eq(alias, "elevation") { return "box-shadow"; }
+    if str_eq(alias, "w") { return "width"; }
+    if str_eq(alias, "h") { return "height"; }
+    if str_eq(alias, "color") | str_eq(alias, "text-color") { return "color"; }
+    if str_eq(alias, "gap") | str_eq(alias, "g") { return "gap"; }
+    if str_eq(alias, "z") { return "z-index"; }
+    if str_eq(alias, "op") { return "opacity"; }
+    if str_eq(alias, "b") { return "border"; }
+    if str_eq(alias, "bc") { return "border-color"; }
+    if str_eq(alias, "bw") { return "border-width"; }
+    if str_eq(alias, "bs") { return "border-style"; }
+    if str_eq(alias, "font") { return "font-family"; }
+    if str_eq(alias, "leading") { return "line-height"; }
+    if str_eq(alias, "tracking") { return "letter-spacing"; }
+    if str_eq(alias, "trans") { return "transition"; }
+    if str_eq(alias, "dir") { return "flex-direction"; }
+    if str_eq(alias, "justify") { return "justify-content"; }
+    if str_eq(alias, "items") { return "align-items"; }
+    if str_eq(alias, "content") { return "align-content"; }
+    if str_eq(alias, "of") { return "overflow"; }
+    if str_eq(alias, "disp") { return "display"; }
+    if str_eq(alias, "pos") { return "position"; }
+    if str_eq(alias, "pointer") { return "cursor"; }
+    if str_eq(alias, "min-w") { return "min-width"; }
+    if str_eq(alias, "max-w") { return "max-width"; }
+    if str_eq(alias, "min-h") { return "min-height"; }
+    if str_eq(alias, "max-h") { return "max-height"; }
+    if str_eq(alias, "aspect") { return "aspect-ratio"; }
+    if str_eq(alias, "backdrop") { return "backdrop-filter"; }
+    if str_eq(alias, "select") { return "user-select"; }
+    if str_eq(alias, "align-text") { return "text-align"; }
+    if str_eq(alias, "decoration") { return "text-decoration"; }
+    return alias;
+}
+
+# --- Value Alias Lookups (White Theme Single Source of Truth) ---
+fn rcs_map_radius_value(val: str): str {
+    if str_eq(val, "none") { return "0px"; }
+    if str_eq(val, "sm") { return "6px"; }
+    if str_eq(val, "md") { return "10px"; }
+    if str_eq(val, "lg") { return "12px"; }
+    if str_eq(val, "xl") { return "16px"; }
+    if str_eq(val, "pill") | str_eq(val, "full") { return "9999px"; }
+    return val;
+}
+
+fn rcs_map_shadow_value(val: str): str {
+    if str_eq(val, "none") { return "none"; }
+    if str_eq(val, "soft") | str_eq(val, "sm") {
+        return "0 1px 2px rgba(16, 24, 40, 0.06)";
+    }
+    if str_eq(val, "md") {
+        return "0 4px 8px -2px rgba(16, 24, 40, 0.08)";
+    }
+    if str_eq(val, "lg") | str_eq(val, "strong") {
+        return "0 12px 24px -6px rgba(16, 24, 40, 0.10)";
+    }
+    return val;
+}
+
+fn rcs_map_size_value(val: str): str {
+    if str_eq(val, "xs") { return "12px"; }
+    if str_eq(val, "sm") { return "13px"; }
+    if str_eq(val, "md") { return "15px"; }
+    if str_eq(val, "lg") { return "18px"; }
+    if str_eq(val, "xl") { return "24px"; }
+    if str_eq(val, "2xl") { return "32px"; }
+    if str_eq(val, "3xl") { return "44px"; }
+    return val;
+}
+
+fn rcs_map_weight_value(val: str): str {
+    if str_eq(val, "light") { return "300"; }
+    if str_eq(val, "normal") { return "400"; }
+    if str_eq(val, "medium") { return "500"; }
+    if str_eq(val, "semibold") { return "600"; }
+    if str_eq(val, "bold") { return "700"; }
+    if str_eq(val, "extrabold") { return "800"; }
+    return val;
+}
+
+fn rcs_map_color_token(val: str): str {
+    if str_eq(val, "bg") { return "var(--bg, #FFFFFF)"; }
+    if str_eq(val, "surface") { return "var(--surface, #FFFFFF)"; }
+    if str_eq(val, "accent") { return "var(--accent, #2563EB)"; }
+    if str_eq(val, "border") { return "var(--border, #E6E8EC)"; }
+    if str_eq(val, "text") { return "var(--text, #101828)"; }
+    if str_eq(val, "text-muted") { return "var(--text-muted, #475467)"; }
+    if str_eq(val, "success") { return "var(--success, #12B76A)"; }
+    if str_eq(val, "danger") { return "var(--danger, #F04438)"; }
+    if str_eq(val, "warn") { return "var(--warn, #F79009)"; }
+    return val;
+}

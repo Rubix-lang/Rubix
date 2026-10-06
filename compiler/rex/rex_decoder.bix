@@ -1,0 +1,127 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Binary Module Decoder
+# File: compiler/rex/rex_decoder.bix
+#
+# Zero-copy binary parser for .rex modules.
+# Provides safe reading primitives and section table discovery.
+# ==============================================================================
+
+
+fn rex_read_u8(buf: i64, p: i64): i64 {
+    return get_byte(buf, p);
+}
+
+fn rex_read_u16(buf: i64, p: i64): i64 {
+    let b0 = get_byte(buf, p + 0);
+    let b1 = get_byte(buf, p + 1);
+    return b0 | (b1 << 8);
+}
+
+fn rex_read_u32(buf: i64, p: i64): i64 {
+    let b0 = get_byte(buf, p + 0);
+    let b1 = get_byte(buf, p + 1);
+    let b2 = get_byte(buf, p + 2);
+    let b3 = get_byte(buf, p + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn rex_read_i32(buf: i64, p: i64): i64 {
+    let v = rex_read_u32(buf, p);
+    if (v & 2147483648) != 0 { # Sign bit set
+        return v - 4294967296;
+    }
+    return v;
+}
+
+fn rex_read_u64(buf: i64, p: i64): i64 {
+    let b0 = get_byte(buf, p + 0);
+    let b1 = get_byte(buf, p + 1);
+    let b2 = get_byte(buf, p + 2);
+    let b3 = get_byte(buf, p + 3);
+    let b4 = get_byte(buf, p + 4);
+    let b5 = get_byte(buf, p + 5);
+    let b6 = get_byte(buf, p + 6);
+    let b7 = get_byte(buf, p + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn rex_read_i64(buf: i64, p: i64): i64 {
+    return rex_read_u64(buf, p);
+}
+
+# Decodes REX header: checks magic, version, size.
+# out_hdr layout:
+#   [0]: version
+#   [1]: flags
+#   [2]: total_size
+#   [3]: section_count
+fn rex_decode_header(buf: i64, len: i64, out_hdr: i64): i64 {
+    if len < 16 {
+        return REX_ERR_TRUNCATED;
+    }
+    if get_byte(buf, 0) != REX_MAGIC_0 { return REX_ERR_BAD_MAGIC; }
+    if get_byte(buf, 1) != REX_MAGIC_1 { return REX_ERR_BAD_MAGIC; }
+    if get_byte(buf, 2) != REX_MAGIC_2 { return REX_ERR_BAD_MAGIC; }
+    if get_byte(buf, 3) != REX_MAGIC_3 { return REX_ERR_BAD_MAGIC; }
+
+    let ver = rex_read_u16(buf, 4);
+    if ver != REX_VERSION_CURRENT {
+        return REX_ERR_UNSUPPORTED_VER;
+    }
+
+    let flags = rex_read_u16(buf, 6);
+    let total_size = rex_read_u32(buf, 8);
+    let sec_cnt = rex_read_u32(buf, 12);
+
+    if total_size > len {
+        return REX_ERR_TRUNCATED;
+    }
+    if total_size < 16 {
+        return REX_ERR_TRUNCATED;
+    }
+
+    set_qword(out_hdr, 0, ver);
+    set_qword(out_hdr, 1, flags);
+    set_qword(out_hdr, 2, total_size);
+    set_qword(out_hdr, 3, sec_cnt);
+    return REX_OK;
+}
+
+# Locates all sections in the module.
+# sec_tbl layout: 16 slots * 2 qwords:
+#   sec_tbl[sec_id * 2 + 0] = offset (from buf start)
+#   sec_tbl[sec_id * 2 + 1] = length
+fn rex_locate_sections(buf: i64, total_size: i64, sec_cnt: i64, sec_tbl: i64): i64 {
+    let i = 0;
+    while i < 32 {
+        set_qword(sec_tbl, i, 0);
+        i = i + 1;
+    }
+
+    let p = 16;
+    let s_idx = 0;
+    while s_idx < sec_cnt {
+        if p + 5 > total_size {
+            return REX_ERR_TRUNCATED;
+        }
+        let sec_id = rex_read_u8(buf, p);
+        let sec_len = rex_read_u32(buf, p + 1);
+        p = p + 5;
+
+        if p + sec_len > total_size {
+            return REX_ERR_BAD_SECTION_LEN;
+        }
+
+        if (sec_id > 0) & (sec_id < 16) {
+            if get_qword(sec_tbl, sec_id * 2 + 1) > 0 {
+                return REX_ERR_DUPLICATE_SEC;
+            }
+            set_qword(sec_tbl, sec_id * 2 + 0, p);
+            set_qword(sec_tbl, sec_id * 2 + 1, sec_len);
+        }
+
+        p = p + sec_len;
+        s_idx = s_idx + 1;
+    }
+    return REX_OK;
+}

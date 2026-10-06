@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="bix-top" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF4B72"/>
+      <stop offset="100%" stop-color="#E11D48"/>
+    </linearGradient>
+    <linearGradient id="bix-side" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BE123C"/>
+      <stop offset="100%" stop-color="#881337"/>
+    </linearGradient>
+  </defs>
+  <!-- Document Sheet Contour -->
+  <path d="M6 3C4.895 3 4 3.895 4 5V27C4 28.105 4.895 29 6 29H26C27.105 29 28 28.105 28 27V11L20 3H6Z" fill="#1E1E2E" stroke="#313244" stroke-width="1.5"/>
+  <path d="M20 3V11H28" fill="#313244"/>
+  
+  <!-- Mini Rubix Monogram Core -->
+  <polygon points="16,13 22,16 16,19 10,16" fill="url(#bix-top)"/>
+  <polygon points="16,19 22,16 22,23 16,26" fill="#E11D48"/>
+  <polygon points="16,19 10,16 10,23 16,26" fill="url(#bix-side)"/>
+  <text x="16" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="5" font-weight="900" fill="#FFFFFF" text-anchor="middle">.bix</text>
+</svg>

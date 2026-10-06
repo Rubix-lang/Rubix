@@ -1,0 +1,66 @@
+# ==============================================================================
+# Rubix Test: Complete Float Arithmetic, Comparison, Function ABI & Printing
+# Verifies f64 addition, subtraction, multiplication, division, comparisons,
+# function arguments, return values, and formatted output.
+# ==============================================================================
+
+fn get_pi(): f64 {
+    return 3.141592653589793;
+}
+
+fn add_floats(a: f64, b: f64): f64 {
+    return a + b;
+}
+
+fn sub_floats(a: f64, b: f64): f64 {
+    return a - b;
+}
+
+fn mul_floats(a: f64, b: f64): f64 {
+    return a * b;
+}
+
+fn div_floats(a: f64, b: f64): f64 {
+    return a / b;
+}
+
+fn main(): i64 {
+    # 1. Arithmetic
+    let a: f64 = 1.5;
+    let b: f64 = 2.5;
+    let c: f64 = a + b;
+    if c != 4.0 { return 1; }
+
+    let diff: f64 = sub_floats(4.0, 1.5);
+    if diff != 2.5 { return 2; }
+
+    let prod: f64 = mul_floats(2.5, 4.0);
+    if prod != 10.0 { return 3; }
+
+    let quot: f64 = div_floats(10.0, 4.0);
+    if quot != 2.5 { return 4; }
+
+    let neg: f64 = 0.0 - 2.5;
+    if neg + 2.5 != 0.0 { return 5; }
+
+    # 2. Comparisons
+    if !(a < b) { return 6; }
+    if !(a <= b) { return 7; }
+    if !(a <= 1.5) { return 8; }
+    if !(b > a) { return 9; }
+    if !(b >= a) { return 10; }
+    if !(b >= 2.5) { return 11; }
+    if a == b { return 12; }
+    if !(a != b) { return 13; }
+
+    # 3. Function calls and returns
+    let pi: f64 = get_pi();
+    if !(pi > 3.14) { return 14; }
+    if !(pi < 3.15) { return 15; }
+
+    let sum_ab: f64 = add_floats(a, b);
+    if sum_ab != 4.0 { return 16; }
+
+    print "PASS: Float arithmetic, comparisons, and ABI verified.\n";
+    return 0;
+}

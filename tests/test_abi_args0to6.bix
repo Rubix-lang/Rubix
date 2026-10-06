@@ -1,0 +1,45 @@
+fn zero(): i64 {
+    return 42;
+}
+
+fn one(a: i64): i64 {
+    return a;
+}
+
+fn two(a: i64, b: i64): i64 {
+    return a + b;
+}
+
+fn three(a: i64, b: i64, c: i64): i64 {
+    return a + b + c;
+}
+
+fn four(a: i64, b: i64, c: i64, d: i64): i64 {
+    return a + b + c + d;
+}
+
+fn five(a: i64, b: i64, c: i64, d: i64, e: i64): i64 {
+    return a + b + c + d + e;
+}
+
+fn six(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64 {
+    return a + b + c + d + e + f;
+}
+
+fn main(): i64 {
+    let s0 = zero();
+    let s1 = one(1);
+    let s2 = two(1, 2);
+    let s3 = three(1, 2, 3);
+    let s4 = four(1, 2, 3, 4);
+    let s5 = five(1, 2, 3, 4, 5);
+    let s6 = six(1, 2, 3, 4, 5, 6);
+    if s0 != 42 { return 1; }
+    if s1 != 1  { return 2; }
+    if s2 != 3  { return 3; }
+    if s3 != 6  { return 4; }
+    if s4 != 10 { return 5; }
+    if s5 != 15 { return 6; }
+    if s6 != 21 { return 7; }
+    return 42;
+}

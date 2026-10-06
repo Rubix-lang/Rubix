@@ -1,0 +1,101 @@
+use std.memory;
+
+fn test_basic_alloc(): i64 {
+    heap_init(65536); # 64KB arena
+    
+    let p1 = heap_alloc(32);
+    let p2 = heap_alloc(64);
+    let p3 = heap_alloc(128);
+
+    if p1 <= 0 { return 1; }
+    if p2 <= 0 { return 2; }
+    if p3 <= 0 { return 3; }
+
+    # Non-overlapping verification
+    if (p1 + 32) > p2 { return 4; }
+    if (p2 + 64) > p3 { return 5; }
+
+    # Write and read verification
+    let addr1 = p1;
+    set_qword(addr1, 0, 11111);
+    set_qword(addr1, 1, 22222);
+
+    let addr2 = p2;
+    set_qword(addr2, 0, 33333);
+    set_qword(addr2, 1, 44444);
+
+    if get_qword(addr1, 0) != 11111 { return 6; }
+    if get_qword(addr1, 1) != 22222 { return 7; }
+    if get_qword(addr2, 0) != 33333 { return 8; }
+    if get_qword(addr2, 1) != 44444 { return 9; }
+
+    return 0;
+}
+
+fn test_alignment_and_tracking(): i64 {
+    let before_count = heap_alloc_count();
+    let before_used = heap_bytes_used();
+
+    let p = heap_alloc(7); # 7 bytes requested -> 16 bytes aligned
+    if (p % 16) != 0 { return 10; }
+
+    let after_count = heap_alloc_count();
+    let after_used = heap_bytes_used();
+
+    if after_count != before_count + 1 { return 11; }
+    if after_used != before_used + 16 { return 12; }
+
+    return 0;
+}
+
+fn test_failure_handling(): i64 {
+    # Requesting allocation larger than remaining capacity must return null (0)
+    let free_bytes = heap_bytes_free();
+    let huge_alloc = heap_alloc(free_bytes + 4096);
+    if huge_alloc != 0 { return 20; }
+    return 0;
+}
+
+fn test_reset_and_reuse(): i64 {
+    let used_before = heap_bytes_used();
+    if used_before <= 0 { return 30; }
+
+    heap_reset();
+    let used_after_reset = heap_bytes_used();
+    if used_after_reset != 0 { return 31; }
+
+    # Re-allocation should succeed from base
+    let p_new = heap_alloc(64);
+    if p_new <= 0 { return 32; }
+
+    return 0;
+}
+
+fn main(): i64 {
+    let r1 = test_basic_alloc();
+    if r1 != 0 {
+        print "FAIL basic_alloc";
+        return 1;
+    }
+
+    let r2 = test_alignment_and_tracking();
+    if r2 != 0 {
+        print "FAIL alignment";
+        return 2;
+    }
+
+    let r3 = test_failure_handling();
+    if r3 != 0 {
+        print "FAIL failure_handling";
+        return 3;
+    }
+
+    let r4 = test_reset_and_reuse();
+    if r4 != 0 {
+        print "FAIL reset";
+        return 4;
+    }
+
+    print "PASS: Heap allocator, alignment, tracking, and OOM safety verified.";
+    return 0;
+}

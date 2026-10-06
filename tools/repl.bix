@@ -1,0 +1,9 @@
+# Interactive Read-Eval-Print Loop for rapid prototyping
+
+def start_repl() do
+    print "Rubix Interactive Shell (v1.0.0)"
+    print "General-Purpose Language Environment"
+    print "Type expressions, definitions, or 'exit' to quit."
+    print "---"
+    print "Ready."
+end

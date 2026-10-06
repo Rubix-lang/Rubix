@@ -1,0 +1,124 @@
+# Rubix Adversarial Metadata & Arithmetic Suite
+
+fn assert_true(cond: Integer, test_name: String) {
+    if cond {
+        print "  [PASS] " + test_name
+    } else {
+        print "  [FAIL] " + test_name
+        panic("Assertion failed")
+    }
+}
+
+fn test_allocation_boundaries() {
+    print "--- 1. Exact Allocation Boundaries (0, 1, 7, 8, 15, 16) ---"
+    
+    # Size 0
+    let b0 = alloc(0)
+    assert_true(length(b0) == 0, "alloc(0) has tracked capacity 0")
+
+    # Size 1
+    let b1 = alloc(1)
+    assert_true(length(b1) == 1, "alloc(1) has tracked capacity 1")
+    set_byte_at(b1, 0, 127)
+    let v1 = get_byte_at(b1, 0)
+    assert_true(v1 == 127, "alloc(1) byte_at offset 0 == 127")
+
+    # Size 7
+    let b7 = alloc(7)
+    assert_true(length(b7) == 7, "alloc(7) has tracked capacity 7")
+    set_byte_at(b7, 0, 10)
+    set_byte_at(b7, 6, 70)
+    assert_true(get_byte_at(b7, 0) == 10, "alloc(7) offset 0 valid")
+    assert_true(get_byte_at(b7, 6) == 70, "alloc(7) offset 6 valid")
+
+    # Size 8
+    let b8 = alloc(8)
+    assert_true(length(b8) == 8, "alloc(8) has tracked capacity 8")
+    set_i64_at(b8, 0, 9876543210)
+    assert_true(get_i64_at(b8, 0) == 9876543210, "alloc(8) i64 at offset 0 valid")
+
+    # Size 15
+    let b15 = alloc(15)
+    assert_true(length(b15) == 15, "alloc(15) has tracked capacity 15")
+    set_i64_at(b15, 7, 1122334455)
+    assert_true(get_i64_at(b15, 7) == 1122334455, "alloc(15) i64 at offset 7 valid")
+
+    # Size 16
+    let b16 = alloc(16)
+    assert_true(length(b16) == 16, "alloc(16) has tracked capacity 16")
+    set_i64_at(b16, 0, 1000)
+    set_i64_at(b16, 8, 2000)
+    assert_true(get_i64_at(b16, 0) == 1000, "alloc(16) offset 0 valid")
+    assert_true(get_i64_at(b16, 8) == 2000, "alloc(16) offset 8 valid")
+}
+
+fn test_string_vs_buffer_discrimination() {
+    print "--- 2. String vs Buffer Discrimination ---"
+    let raw_buf = alloc(64)
+    # A raw allocation must report its capacity through length(), NOT strlen()
+    assert_true(length(raw_buf) == 64, "Raw buffer length(buf) returns allocation capacity 64")
+
+    # A string concatenation must report character length
+    let str_val = "Rubix" + "Language"
+    assert_true(length(str_val) == 13, "String concat length returns 13")
+
+    # A substring must report character length
+    let sub_val = substring("CyberSecurityAudit", 5, 13)
+    assert_true(length(sub_val) == 8, "Substring length returns 8")
+    assert_true(sub_val == "Security", "Substring value is 'Security'")
+
+    # int_to_string must report character length
+    let int_str = text(987654)
+    assert_true(length(int_str) == 6, "text(int) length returns 6")
+
+    # Raw literal in .rodata
+    assert_true(length("Verified") == 8, "String literal in .rodata has length 8")
+
+    # Untagged integer
+    assert_true(length(5000000) == 0, "Untagged integer length returns 0 without segfault")
+}
+
+fn test_heap_rewind_cycles() {
+    print "--- 3. Heap Rewind Cycles ---"
+    let mark = heap_mark()
+    let temp_buf = alloc(256)
+    set_i64_at(temp_buf, 0, 424242)
+    assert_true(get_i64_at(temp_buf, 0) == 424242, "Pre-rewind allocation write succeeds")
+    
+    # Rewind to mark
+    heap_rewind(mark)
+
+    # Re-allocate: new allocation occupies previous position
+    let new_buf = alloc(256)
+    assert_true(new_buf == temp_buf, "Rewind restored allocator position deterministically")
+    set_i64_at(new_buf, 0, 848484)
+    assert_true(get_i64_at(new_buf, 0) == 848484, "Post-rewind re-allocation works correctly")
+}
+
+fn test_read_file_error_paths() {
+    print "--- 4. read_file Error Paths ---"
+    let no_file = read_file("nonexistent_path_xyz_99999.txt")
+    assert_true(no_file == "", "read_file on nonexistent file returns empty string")
+
+    let dir_file = read_file(".")
+    assert_true(dir_file == "", "read_file on directory returns empty string without crashing")
+
+    let null_file = read_file("/dev/null")
+    assert_true(null_file == "", "read_file on 0-byte file returns empty string")
+}
+
+fn main(): Integer {
+    print "=========================================================="
+    print "  RUBIX ADVERSARIAL METADATA & ARITHMETIC SUITE           "
+    print "=========================================================="
+
+    test_allocation_boundaries()
+    test_string_vs_buffer_discrimination()
+    test_heap_rewind_cycles()
+    test_read_file_error_paths()
+
+    print "=========================================================="
+    print "  ALL ADVERSARIAL RUBIX TESTS PASSED!                     "
+    print "=========================================================="
+    0
+}

@@ -1,0 +1,104 @@
+# ==============================================================================
+# Rubix Unit Test — Direct x86-64 Machine-Code Emitter (tests/unit/test_x86_emitter.bix)
+# Pure Rubix test asserting byte-for-byte encoding correctness against Intel SDM.
+# ==============================================================================
+
+use compiler.backend.emitter;
+use compiler.backend.registers;
+
+fn test_push_rbp(): Boolean {
+    let buf = byte_buf_new()
+    emit_push_reg(buf, REG_RBP)
+    if buf.len != 1 { return false }
+    if buf.bytes[0] != 85 { return false } # 0x55
+    return true
+}
+
+fn test_mov_rbp_rsp(): Boolean {
+    let buf = byte_buf_new()
+    emit_mov_reg(buf, REG_RSP, REG_RBP)
+    if buf.len != 3 { return false }
+    if buf.bytes[0] != 72  { return false } # 0x48 (REX.W)
+    if buf.bytes[1] != 137 { return false } # 0x89
+    if buf.bytes[2] != 229 { return false } # 0xE5 (ModR/M)
+    return true
+}
+
+fn test_mov_rax_imm42(): Boolean {
+    let buf = byte_buf_new()
+    emit_mov_imm64(buf, REG_RAX, 42)
+    if buf.len != 10 { return false }
+    if buf.bytes[0] != 72  { return false } # 0x48 (REX.W)
+    if buf.bytes[1] != 184 { return false } # 0xB8
+    if buf.bytes[2] != 42  { return false } # 0x2A
+    mut i = 3
+    while i < 10 {
+        if buf.bytes[i] != 0 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_mov_rsp_rbp(): Boolean {
+    let buf = byte_buf_new()
+    emit_mov_reg(buf, REG_RBP, REG_RSP)
+    if buf.len != 3 { return false }
+    if buf.bytes[0] != 72  { return false } # 0x48 (REX.W)
+    if buf.bytes[1] != 137 { return false } # 0x89
+    if buf.bytes[2] != 236 { return false } # 0xEC (ModR/M)
+    return true
+}
+
+fn test_pop_rbp(): Boolean {
+    let buf = byte_buf_new()
+    emit_pop_reg(buf, REG_RBP)
+    if buf.len != 1 { return false }
+    if buf.bytes[0] != 93 { return false } # 0x5D
+    return true
+}
+
+fn test_ret(): Boolean {
+    let buf = byte_buf_new()
+    emit_ret(buf)
+    if buf.len != 1 { return false }
+    if buf.bytes[0] != 195 { return false } # 0xC3
+    return true
+}
+
+fn test_full_19_bytes(): Boolean {
+    let buf = byte_buf_new()
+    emit_function_return_imm(buf, 42)
+    if buf.len != 19 { return false }
+
+    let expected = [
+        85,                               # 0x55
+        72, 137, 229,                     # 0x48 0x89 0xE5
+        72, 184, 42, 0, 0, 0, 0, 0, 0, 0, # 0x48 0xB8 0x2A 0x00 0x00 0x00 0x00 0x00 0x00 0x00
+        72, 137, 236,                     # 0x48 0x89 0xEC
+        93,                               # 0x5D
+        195                               # 0xC3
+    ]
+
+    mut i = 0
+    while i < 19 {
+        if buf.bytes[i] != expected[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn main(): Integer {
+    print "Running test_x86_emitter unit tests..."
+    if not test_push_rbp() { print "FAIL: test_push_rbp"; return 1 }
+    if not test_mov_rbp_rsp() { print "FAIL: test_mov_rbp_rsp"; return 2 }
+    if not test_mov_rax_imm42() { print "FAIL: test_mov_rax_imm42"; return 3 }
+    if not test_mov_rsp_rbp() { print "FAIL: test_mov_rsp_rbp"; return 4 }
+    if not test_pop_rbp() { print "FAIL: test_pop_rbp"; return 5 }
+    if not test_ret() { print "FAIL: test_ret"; return 6 }
+    if not test_full_19_bytes() { print "FAIL: test_full_19_bytes"; return 7 }
+
+    print "ALL EMITTER TESTS PASSED: Exact 19-byte sequence verified."
+    return 0
+}

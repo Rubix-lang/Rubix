@@ -1,0 +1,133 @@
+# ==============================================================================
+# Rubix Compiler - AST Parser (Phase A)
+# Parses a strict subset of declarations into AST nodes without compiling to UIR.
+# ==============================================================================
+
+fn ast_parse_advance(s: i64): i64 {
+    let src = get_qword(s, 0);
+    let src_len = get_qword(s, 1);
+    let cur_p = get_qword(s, 2);
+    let next_p = scan_token(src, cur_p, src_len, s + 64);
+    set_qword(s, 2, next_p);
+    return get_qword(s + 64, 0);
+}
+
+# s memory layout:
+#   s[0]: src pointer
+#   s[1]: src length
+#   s[2]: current scan position
+#   s[7]: error status code
+#   s[8]: error source position
+#   s[9]: error offending token kind
+#   s + 64: token buffer (token_kind, val, offset, len)
+# ast_buf is the AST node arena buffer.
+fn ast_parse_program(s: i64, ast_buf: i64): i64 {
+    ast_parse_advance(s); # Prime token
+    
+    let first_decl = 0;
+    let last_decl = 0;
+    
+    while get_qword(s + 64, 0) != TOKEN_EOF {
+        let k = get_qword(s + 64, 0);
+        
+        if k == TOKEN_ERROR {
+            set_qword(s, 7, -3); # ERR_INVALID_TOKEN
+            set_qword(s, 8, get_qword(s + 64, 2)); # error source position
+            set_qword(s, 9, k); # offending token kind
+            return -3;
+        }
+
+        if (k == TOKEN_KW_LET) | (k == TOKEN_KW_CONST) {
+            let is_let = 0;
+            if k == TOKEN_KW_LET { is_let = 1; }
+            let src_off = get_qword(s + 64, 2);
+            ast_parse_advance(s); # consume const/let
+            
+            if get_qword(s + 64, 0) != TOKEN_IDENT {
+                set_qword(s, 7, -1); # ERR_SYNTAX
+                set_qword(s, 8, get_qword(s + 64, 2));
+                set_qword(s, 9, get_qword(s + 64, 0));
+                return -1;
+            }
+            let name_off = get_qword(s + 64, 2);
+            let name_len = get_qword(s + 64, 3);
+            let name_hash = hash_token(get_qword(s, 0), name_off, name_len);
+            
+            ast_parse_advance(s);
+            if get_qword(s + 64, 0) == TOKEN_COLON {
+                ast_parse_advance(s);
+                # skip type ident
+                if get_qword(s + 64, 0) == TOKEN_IDENT {
+                    ast_parse_advance(s);
+                }
+            }
+            
+            if get_qword(s + 64, 0) != TOKEN_EQUAL {
+                set_qword(s, 7, -1); # ERR_SYNTAX
+                set_qword(s, 8, get_qword(s + 64, 2));
+                set_qword(s, 9, get_qword(s + 64, 0));
+                return -1;
+            }
+            ast_parse_advance(s);
+            
+            let neg = 0;
+            if get_qword(s + 64, 0) == TOKEN_MINUS {
+                neg = 1;
+                ast_parse_advance(s);
+            }
+            
+            if get_qword(s + 64, 0) != TOKEN_INT_LIT {
+                set_qword(s, 7, -1); # ERR_SYNTAX
+                set_qword(s, 8, get_qword(s + 64, 2));
+                set_qword(s, 9, get_qword(s + 64, 0));
+                return -1;
+            }
+            let cval = get_qword(s + 64, 1);
+            if neg == 1 { cval = 0 - cval; }
+            
+            let end_off = get_qword(s + 64, 2) + get_qword(s + 64, 3);
+            ast_parse_advance(s);
+            if get_qword(s + 64, 0) == TOKEN_SEMICOLON { 
+                end_off = get_qword(s + 64, 2) + get_qword(s + 64, 3);
+                ast_parse_advance(s); 
+            }
+            
+            let decl_node = 0;
+            if is_let == 1 {
+                decl_node = ast_make_let_decl(ast_buf, src_off, end_off - src_off, name_hash, cval, 0);
+            } else {
+                decl_node = ast_make_const_decl(ast_buf, src_off, end_off - src_off, name_hash, cval, 0);
+            }
+            
+            # Bounds / allocation failure check: never use negative index or write out of bounds
+            if decl_node <= 0 {
+                set_qword(s, 7, -100); # ERR_AST_ALLOC_FAIL
+                set_qword(s, 8, src_off);
+                set_qword(s, 9, k);
+                return -100;
+            }
+            
+            if first_decl == 0 {
+                first_decl = decl_node;
+            } else {
+                let base = ast_buf + 16 + (last_decl * 64);
+                set_qword(base, 4, decl_node); # link to next
+            }
+            last_decl = decl_node;
+            
+        } else {
+            # Unsupported token: record context and return deterministic syntax error
+            set_qword(s, 7, -1); # ERR_SYNTAX
+            set_qword(s, 8, get_qword(s + 64, 2)); # source position
+            set_qword(s, 9, k); # offending token kind
+            return -1;
+        }
+    }
+    
+    let root = ast_make_program(ast_buf, first_decl);
+    if root <= 0 {
+        set_qword(s, 7, -100); # ERR_AST_ALLOC_FAIL
+        return -100;
+    }
+    return root;
+}

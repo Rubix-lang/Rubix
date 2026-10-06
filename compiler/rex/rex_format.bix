@@ -1,0 +1,101 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Format Specification & Constants
+# File: compiler/rex/rex_format.bix
+#
+# REX is the portable execution exchange target of the Rubix compiler.
+# Designed from first principles for safe, deterministic, structured value-flow execution.
+# Zero CPU register emulation, zero fake CPU stack frames, zero JavaScript/Wasm dependency.
+# ==============================================================================
+
+# --- Header & Magic Constants ---
+let REX_MAGIC_0 = 127; # 0x7F
+let REX_MAGIC_1 = 82;  # 'R'
+let REX_MAGIC_2 = 69;  # 'E'
+let REX_MAGIC_3 = 88;  # 'X'
+let REX_MAGIC_U32 = 1480995199; # 0x5845527F little-endian
+let REX_VERSION_CURRENT = 1;
+
+# --- Section Identifiers ---
+let REX_SEC_TYPES     = 1;
+let REX_SEC_FUNCTIONS = 2;
+let REX_SEC_MEMORY    = 3;
+let REX_SEC_DATA      = 4;
+let REX_SEC_CODE      = 5;
+let REX_SEC_EXPORTS   = 6;
+let REX_SEC_METADATA  = 7;
+
+# --- REX Primitive Types ---
+let REX_TYPE_VOID = 0;
+let REX_TYPE_I64  = 1;
+let REX_TYPE_I32  = 2;
+let REX_TYPE_F64  = 3;
+let REX_TYPE_PTR  = 4;
+
+# --- REX Opcodes ---
+# Constants & Data Movement
+let REX_OP_CONST_I64 = 1;   # 0x01: dst:u16, val:i64
+let REX_OP_CONST_I32 = 2;   # 0x02: dst:u16, val:i32
+let REX_OP_MOVE      = 3;   # 0x03: dst:u16, src:u16
+
+# Arithmetic & Logic (64-bit)
+let REX_OP_ADD_I64   = 16;  # 0x10: dst:u16, s1:u16, s2:u16
+let REX_OP_SUB_I64   = 17;  # 0x11: dst:u16, s1:u16, s2:u16
+let REX_OP_MUL_I64   = 18;  # 0x12: dst:u16, s1:u16, s2:u16
+let REX_OP_DIV_I64   = 19;  # 0x13: dst:u16, s1:u16, s2:u16 (traps on div-by-zero)
+let REX_OP_MOD_I64   = 20;  # 0x14: dst:u16, s1:u16, s2:u16 (traps on mod-by-zero)
+let REX_OP_NEG_I64   = 21;  # 0x15: dst:u16, src:u16
+let REX_OP_AND_I64   = 22;  # 0x16: dst:u16, s1:u16, s2:u16
+let REX_OP_OR_I64    = 23;  # 0x17: dst:u16, s1:u16, s2:u16
+let REX_OP_XOR_I64   = 24;  # 0x18: dst:u16, s1:u16, s2:u16
+let REX_OP_NOT_I64   = 25;  # 0x19: dst:u16, src:u16
+let REX_OP_SHL_I64   = 26;  # 0x1A: dst:u16, s1:u16, s2:u16
+let REX_OP_SHR_I64   = 27;  # 0x1B: dst:u16, s1:u16, s2:u16
+
+# Comparisons (result is i64: 1 for true, 0 for false)
+let REX_OP_CMP_EQ    = 32;  # 0x20: dst:u16, s1:u16, s2:u16
+let REX_OP_CMP_NE    = 33;  # 0x21: dst:u16, s1:u16, s2:u16
+let REX_OP_CMP_LT    = 34;  # 0x22: dst:u16, s1:u16, s2:u16
+let REX_OP_CMP_LE    = 35;  # 0x23: dst:u16, s1:u16, s2:u16
+let REX_OP_CMP_GT    = 36;  # 0x24: dst:u16, s1:u16, s2:u16
+let REX_OP_CMP_GE    = 37;  # 0x25: dst:u16, s1:u16, s2:u16
+
+# Structured Control Flow
+let REX_OP_JUMP      = 48;  # 0x30: target_pc:u32
+let REX_OP_BRANCH    = 49;  # 0x31: cond:u16, target_true:u32, target_false:u32
+let REX_OP_CALL      = 50;  # 0x32: dst:u16, func_idx:u32, arg_cnt:u16, args:[u16...]
+let REX_OP_RETURN    = 51;  # 0x33: src:u16 (or 0xFFFF for void)
+let REX_OP_TRAP      = 52;  # 0x34: code:u16
+
+# Memory Operations (Bounded Linear Memory)
+let REX_OP_LOAD_64   = 64;  # 0x40: dst:u16, base:u16, offset:i32
+let REX_OP_STORE_64  = 65;  # 0x41: base:u16, val:u16, offset:i32
+let REX_OP_LOAD_8    = 66;  # 0x42: dst:u16, base:u16, offset:i32
+let REX_OP_STORE_8   = 67;  # 0x43: base:u16, val:u16, offset:i32
+let REX_OP_ALLOC_MEM = 68;  # 0x44: dst:u16, size:u32
+let REX_OP_ADDR_LOCAL= 69;  # 0x45: dst:u16, offset:u32
+
+# Type Conversion
+let REX_OP_CONV      = 80;  # 0x50: dst:u16, src:u16, from_type:u8, to_type:u8
+
+# --- REX Validator & Runtime Trap / Error Codes ---
+let REX_OK                  = 0;
+let REX_ERR_BAD_MAGIC       = -101;
+let REX_ERR_UNSUPPORTED_VER = -102;
+let REX_ERR_TRUNCATED       = -103;
+let REX_ERR_BAD_SECTION_LEN = -104;
+let REX_ERR_DUPLICATE_SEC   = -105;
+let REX_ERR_INVALID_FUNC_IDX= -106;
+let REX_ERR_INVALID_VAL_SLOT= -107;
+let REX_ERR_INVALID_OPCODE  = -108;
+let REX_ERR_BAD_BRANCH_TGT  = -109;
+let REX_ERR_TYPE_MISMATCH   = -110;
+let REX_ERR_NO_MAIN_EXPORT  = -111;
+let REX_ERR_CALL_ARITY      = -112;
+
+# Runtime Trap Codes
+let REX_TRAP_NONE           = 0;
+let REX_TRAP_DIV_BY_ZERO    = 1;
+let REX_TRAP_OUT_OF_BOUNDS  = 2;
+let REX_TRAP_STACK_OVERFLOW = 3;
+let REX_TRAP_ILLEGAL_STATE  = 4;
+let REX_TRAP_EXPLICIT       = 5;

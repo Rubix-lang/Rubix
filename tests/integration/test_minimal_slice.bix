@@ -1,0 +1,25 @@
+# ==============================================================================
+# Rubix Integration Test — Minimal Vertical Slice (tests/integration/test_minimal_slice.bix)
+# Pure Rubix test compiling source to machine-code bytes and executing in-memory.
+# ==============================================================================
+
+use compiler.main
+
+fn main(): Integer {
+    print "Running test_minimal_slice integration test..."
+    let source = "fn main(): i64 {\n    return 42;\n}"
+    print "Source program:"
+    print source
+
+    let exit_code = compile_and_run(source)
+    print "Execution result:"
+    print exit_code
+
+    if exit_code != 42 {
+        print "FAIL: Expected return code 42"
+        return 1
+    }
+
+    print "ALL INTEGRATION TESTS PASSED: Program compiled directly to machine bytes and executed 42."
+    return 0
+}

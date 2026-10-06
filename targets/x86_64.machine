@@ -1,0 +1,230 @@
+# ==============================================================================
+# Rubix Universal Machine Synthesis (RUMS) — Target Machine Description
+# Target Architecture: x86-64 (AMD64 / Intel 64)
+# System V AMD64 ABI Standard Specification
+# ==============================================================================
+
+target x86_64 {
+    machine_format_version: 1;
+    word_size: 8;
+    endianness: little;
+    stack_alignment: 16;
+    stack_direction: down;
+    instruction_width: 0;
+    pc_relative_calls: true;
+}
+
+# ------------------------------------------------------------------------------
+# Physical Register File
+# ------------------------------------------------------------------------------
+registers {
+    # id  name   role           callee_saved  class
+    reg 0  rax   return_val     false         general;
+    reg 1  rcx   arg4_shift     false         general;
+    reg 2  rdx   arg3_highdiv   false         general;
+    reg 3  rbx   preserved      true          general;
+    reg 4  rsp   stack_ptr      true          special;
+    reg 5  rbp   frame_ptr      true          special;
+    reg 6  rsi   arg2           false         general;
+    reg 7  rdi   arg1           false         general;
+    reg 8  r8    arg5           false         general;
+    reg 9  r9    arg6           false         general;
+    reg 10 r10   scratch        false         general;
+    reg 11 r11   scratch        false         general;
+    reg 12 r12   preserved      true          general;
+    reg 13 r13   preserved      true          general;
+    reg 14 r14   preserved      true          general;
+    reg 15 r15   preserved      true          general;
+}
+
+# ------------------------------------------------------------------------------
+# Calling Convention: System V AMD64 ABI
+# ------------------------------------------------------------------------------
+calling_convention sysv {
+    args: [rdi, rsi, rdx, rcx, r8, r9];
+    return_reg: rax;
+    scratch_pool: [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11];
+    preserved_pool: [rbx, r12, r13, r14, r15];
+    stack_entry_disp: 16;
+}
+
+# ------------------------------------------------------------------------------
+# Universal IR to Native Instruction Patterns & Byte Templates
+# ------------------------------------------------------------------------------
+patterns {
+    # Movement & Constants
+    pattern MOV_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x89, MODRM_REG(src, dst)];
+    }
+
+    pattern MOV_REG_IMM64(dst, imm) {
+        cost: 2;
+        latency: 1;
+        encoding: [0x48, 0xB8 + REG_ID(dst), IMM64(imm)];
+    }
+
+    # Integer Arithmetic
+    pattern ADD_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x01, MODRM_REG(src, dst)];
+    }
+
+    pattern ADD_REG_IMM32(dst, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x81, MODRM_EXT(0, dst), IMM32(imm)];
+    }
+
+    pattern SUB_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x29, MODRM_REG(src, dst)];
+    }
+
+    pattern SUB_REG_IMM32(dst, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x81, MODRM_EXT(5, dst), IMM32(imm)];
+    }
+
+    pattern IMUL_REG_REG(dst, src) {
+        cost: 3;
+        latency: 3;
+        encoding: [0x48, 0x0F, 0xAF, MODRM_REG(dst, src)];
+    }
+
+    pattern NEG_REG(dst) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0xF7, MODRM_EXT(3, dst)];
+    }
+
+    # Bitwise Operations
+    pattern AND_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x21, MODRM_REG(src, dst)];
+    }
+
+    pattern OR_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x09, MODRM_REG(src, dst)];
+    }
+
+    pattern XOR_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x31, MODRM_REG(src, dst)];
+    }
+
+    pattern NOT_REG(dst) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0xF7, MODRM_EXT(2, dst)];
+    }
+
+    pattern SHL_REG_IMM8(dst, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0xC1, MODRM_EXT(4, dst), IMM8(imm)];
+    }
+
+    pattern SAR_REG_IMM8(dst, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0xC1, MODRM_EXT(7, dst), IMM8(imm)];
+    }
+
+    # Comparisons
+    pattern CMP_REG_REG(src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x39, MODRM_REG(src2, src1)];
+    }
+
+    pattern CMP_REG_IMM32(src1, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x81, MODRM_EXT(7, src1), IMM32(imm)];
+    }
+
+    # Memory Operations
+    pattern LOAD_REG_MEM(dst, base_reg, disp) {
+        cost: 2;
+        latency: 3;
+        encoding: [0x48, 0x8B, MODRM_DISP(dst, base_reg, disp)];
+    }
+
+    pattern STORE_MEM_REG(base_reg, disp, src) {
+        cost: 2;
+        latency: 2;
+        encoding: [0x48, 0x89, MODRM_DISP(src, base_reg, disp)];
+    }
+
+    # Control Flow
+    pattern JMP_REL32(disp) {
+        cost: 1;
+        latency: 1;
+        encoding: [0xE9, DISP32(disp)];
+    }
+
+    pattern CALL_REL32(disp) {
+        cost: 2;
+        latency: 2;
+        encoding: [0xE8, DISP32(disp)];
+    }
+
+    # Advanced Addressing & Bit Operations
+    pattern LEA_REG_REG_SCALE_DISP(dst, base, index, scale, disp) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x8D, SIB_DISP(dst, base, index, scale, disp)];
+    }
+
+    pattern SHR_REG_IMM8(dst, imm) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0xC1, MODRM_EXT(5, dst), IMM8(imm)];
+    }
+
+    pattern TEST_REG_REG(src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x85, MODRM_REG(src2, src1)];
+    }
+
+    pattern CQO() {
+        cost: 1;
+        latency: 1;
+        encoding: [0x48, 0x99];
+    }
+
+    pattern IDIV_REG(src) {
+        cost: 10;
+        latency: 12;
+        encoding: [0x48, 0xF7, MODRM_EXT(7, src)];
+    }
+
+    pattern RET() {
+        cost: 1;
+        latency: 1;
+        encoding: [0xC3];
+    }
+
+    # Vector / SIMD AI Acceleration Patterns
+    pattern VEC_FMA(dst, src1, src2) {
+        cost: 2;
+        latency: 4;
+        encoding: [0xC4, 0xE2, 0x79, 0xB8];
+    }
+
+    pattern VEC_DOT(dst, src1, src2) {
+        cost: 2;
+        latency: 3;
+        encoding: [0x66, 0x0F, 0x38, 0x40];
+    }
+}

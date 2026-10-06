@@ -1,0 +1,8 @@
+Rubix:
+  type: programming
+  color: "#E11D48"
+  extensions:
+    - ".bix"
+  tm_scope: source.rubix
+  ace_mode: text
+  language_id: 9948201

@@ -1,0 +1,38 @@
+# Classic algorithms in Rubix: GCD and fast exponentiation.
+# Run with: rubix run examples/04_algorithms.bix
+
+# Euclidean Algorithm to find the Greatest Common Divisor (GCD)
+fn gcd(a: Integer, b: Integer): Integer {
+    mut x = a
+    mut y = b
+    loop y != 0 {
+        let remainder = x % y
+        x = y
+        y = remainder
+    }
+    x
+}
+
+# Computes base^exp
+fn power(base: Integer, exp: Integer): Integer {
+    mut res = 1
+    mut i = 0
+    loop i < exp {
+        res = res * base
+        i = i + 1
+    }
+    res
+}
+
+fn main(): Integer {
+    print "GCD of 48 and 18:"
+    print gcd(48, 18)
+
+    print "2 raised to the power 10:"
+    print power(2, 10)
+
+    print "3 raised to the power 5:"
+    print power(3, 5)
+
+    0
+}

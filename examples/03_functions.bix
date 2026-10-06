@@ -1,0 +1,32 @@
+# Recursion and Tail-Call Optimization (TCO) in Rubix.
+# Run with: rubix run examples/03_recursion_and_tco.bix
+
+# 1. Standard recursion (Fibonacci)
+fn fib(n: Integer): Integer {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+# 2. Tail-recursive function with an accumulator
+# The compiler recognizes that `sum_acc` is called directly at the return site,
+# converting the recursion into a zero-overhead loop jump with O(1) stack space.
+fn sum_acc(n: Integer, acc: Integer): Integer {
+    if n <= 0 {
+        acc
+    } else {
+        sum_acc(n - 1, acc + n)
+    }
+}
+
+fn main(): Integer {
+    print "Fibonacci(10):"
+    print fib(10)
+
+    print "Tail-recursive sum 1..100:"
+    print sum_acc(100, 0)
+
+    0
+}

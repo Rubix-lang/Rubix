@@ -1,0 +1,3561 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native Test Suite (rubix/tests/test_rcs_native.bix)
+# Replaces the deleted Python test_rcs_engine.py with native Rubix tests.
+# Exercises: lexer, parser, resolver, bake, and emit_css modules.
+# ==============================================================================
+
+# ==============================================================================
+# Rubix Standard Library: Core Assertions & Utilities (std/core.bix)
+# Canonical assertions, identity, and fundamental primitives.
+# ==============================================================================
+
+fn identity(x: i64): i64 = x;
+
+fn assert_true(cond: bool): i64 {
+    if cond { return 0; }
+    return -1;
+}
+
+fn assert_false(cond: bool): i64 {
+    if cond == false { return 0; }
+    return -1;
+}
+
+fn assert_eq_int(actual: i64, expected: i64): i64 {
+    if actual == expected { return 0; }
+    return -1;
+}
+
+fn assert_eq_str(actual: str, expected: str): i64 {
+    if actual == expected { return 0; }
+    return -1;
+}
+# ==============================================================================
+# Rubix Standard Library: String Operations (std/string.bix)
+# Pure native string predicates, slicing, trimming, formatting, and conversion.
+# ==============================================================================
+
+fn string_is_empty(s: str): bool =
+    string_length(s) == 0;
+
+fn string_starts_with(s: str, prefix: str): bool {
+    let s_len = string_length(s);
+    let p_len = string_length(prefix);
+    if p_len > s_len { return false; }
+    let i = 0;
+    while i < p_len {
+        if s[i] != prefix[i] { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn string_ends_with(s: str, suffix: str): bool {
+    let s_len = string_length(s);
+    let suf_len = string_length(suffix);
+    if suf_len > s_len { return false; }
+    let offset = s_len - suf_len;
+    let i = 0;
+    while i < suf_len {
+        if s[offset + i] != suffix[i] { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn string_index_of(s: str, needle: str): i64 {
+    let s_len = string_length(s);
+    let n_len = string_length(needle);
+    if n_len == 0 { return 0; }
+    if n_len > s_len { return -1; }
+    let i = 0;
+    while i <= (s_len - n_len) {
+        let match_ok = 1;
+        let j = 0;
+        while j < n_len {
+            if s[i + j] != needle[j] {
+                match_ok = 0;
+            }
+            j = j + 1;
+        }
+        if match_ok == 1 { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn string_contains(s: str, needle: str): bool =
+    string_index_of(s, needle) >= 0;
+
+fn string_slice(s: str, start: i64, len: i64): str {
+    let s_len = string_length(s);
+    if (start < 0) | (start >= s_len) { return ""; }
+    let real_len = len;
+    if (start + real_len) > s_len {
+        real_len = s_len - start;
+    }
+    if real_len <= 0 { return ""; }
+    let buf = alloc_buffer(real_len + 1) as *u8;
+    let i = 0;
+    while i < real_len {
+        buf[i] = s[start + i];
+        i = i + 1;
+    }
+    buf[real_len] = 0 as u8;
+    let res = string_from_raw(buf);
+    free_buffer(buf as ptr, real_len + 1);
+    return res;
+}
+
+fn string_trim(s: str): str {
+    let s_len = string_length(s);
+    if s_len == 0 { return ""; }
+    let start = 0;
+    while (start < s_len) & ((s[start] == (32 as u8)) | (s[start] == (9 as u8)) | (s[start] == (10 as u8)) | (s[start] == (13 as u8))) {
+        start = start + 1;
+    }
+    if start >= s_len { return ""; }
+    let end = s_len - 1;
+    while (end > start) & ((s[end] == (32 as u8)) | (s[end] == (9 as u8)) | (s[end] == (10 as u8)) | (s[end] == (13 as u8))) {
+        end = end - 1;
+    }
+    let trimmed_len = (end - start) + 1;
+    return string_slice(s, start, trimmed_len);
+}
+
+fn string_repeat(s: str, count: i64): str {
+    if count <= 0 { return ""; }
+    let res = "";
+    let i = 0;
+    while i < count {
+        res = res + s;
+        i = i + 1;
+    }
+    return res;
+}
+
+fn int_to_str(val: i64): str {
+    if val == 0 { return "0"; }
+    let is_neg = 0;
+    let v = val;
+    if v < 0 {
+        is_neg = 1;
+        v = 0 - v;
+    }
+    let temp = v;
+    let digits = 0;
+    while temp > 0 {
+        digits = digits + 1;
+        temp = temp / 10;
+    }
+    let total_len = if is_neg == 1 { digits + 1 } else { digits };
+    let buf = alloc_buffer(total_len + 1) as *u8;
+    buf[total_len] = 0 as u8;
+    let idx = total_len - 1;
+    while v > 0 {
+        let digit = v % 10;
+        buf[idx] = (48 + digit) as u8;
+        idx = idx - 1;
+        v = v / 10;
+    }
+    if is_neg == 1 {
+        buf[0] = 45 as u8;
+    }
+    let res = string_from_raw(buf);
+    free_buffer(buf as ptr, total_len + 1);
+    return res;
+}
+
+fn string_to_upper(s: str): str {
+    let l = string_length(s);
+    if l == 0 { return ""; }
+    let buf = alloc_buffer(l + 1) as *u8;
+    let i = 0;
+    while i < l {
+        let b = s[i];
+        if (b >= (97 as u8)) & (b <= (122 as u8)) {
+            buf[i] = (b - (32 as u8)) as u8;
+        } else {
+            buf[i] = b;
+        }
+        i = i + 1;
+    }
+    buf[l] = 0 as u8;
+    let res = string_from_raw(buf);
+    free_buffer(buf as ptr, l + 1);
+    return res;
+}
+
+fn string_to_lower(s: str): str {
+    let l = string_length(s);
+    if l == 0 { return ""; }
+    let buf = alloc_buffer(l + 1) as *u8;
+    let i = 0;
+    while i < l {
+        let b = s[i];
+        if (b >= (65 as u8)) & (b <= (90 as u8)) {
+            buf[i] = (b + (32 as u8)) as u8;
+        } else {
+            buf[i] = b;
+        }
+        i = i + 1;
+    }
+    buf[l] = 0 as u8;
+    let res = string_from_raw(buf);
+    free_buffer(buf as ptr, l + 1);
+    return res;
+}
+
+fn string_replace_char(s: str, from_c: u8, to_c: u8): str {
+    let l = string_length(s);
+    if l == 0 { return ""; }
+    let buf = alloc_buffer(l + 1) as *u8;
+    let i = 0;
+    while i < l {
+        let b = s[i];
+        if b == from_c {
+            buf[i] = to_c;
+        } else {
+            buf[i] = b;
+        }
+        i = i + 1;
+    }
+    buf[l] = 0 as u8;
+    let res = string_from_raw(buf);
+    free_buffer(buf as ptr, l + 1);
+    return res;
+}
+
+fn string_parse_int(s: str): i64 {
+    let l = string_length(s);
+    if l == 0 { return 0; }
+    let i = 0;
+    let is_neg = 0;
+    if s[0] == (45 as u8) {
+        is_neg = 1;
+        i = 1;
+    }
+    let res = 0;
+    while i < l {
+        let b = s[i];
+        if (b >= (48 as u8)) & (b <= (57 as u8)) {
+            let digit = (b - (48 as u8)) as i64;
+            res = (res * 10) + digit;
+        } else {
+            i = l;
+        }
+        i = i + 1;
+    }
+    if is_neg == 1 {
+        return 0 - res;
+    }
+    return res;
+}
+
+fn string_char_at(s: str, idx: i64): u8 {
+    let l = string_length(s);
+    if (idx < 0) | (idx >= l) { return 0 as u8; }
+    return s[idx];
+}
+
+fn string_from_int(val: i64): str {
+    return "" + val;
+}
+
+# ==============================================================================
+# Webbix Web IR — Core Domain Types (webbix/ir/types.bix)
+# Pure Rubix domain types for native Web IR compilation.
+# Zero HTML or CSS dependencies.
+#
+# Foundational type system for the entire Webbix framework.
+# Every semantic web concept maps to a typed enum value.
+# Each enum has <= 32 variants (Rubix compiler enum table capacity).
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Semantic Node Kinds (Core HTML5 Semantic Coverage, max 32 variants)
+# ------------------------------------------------------------------------------
+enum WebKind {
+    App,
+    Page,
+    Header,
+    Nav,
+    NavLink,
+    Main,
+    Hero,
+    Title,
+    Heading,
+    Text,
+    Paragraph,
+    Button,
+    StatsGrid,
+    StatCard,
+    Section,
+    Article,
+    Aside,
+    Grid,
+    Flex,
+    ProjectCard,
+    Card,
+    Badge,
+    Form,
+    Label,
+    Input,
+    Footer,
+    List,
+    ListItem,
+    Table,
+    Image,
+    Modal,
+    EscapeHatch
+}
+
+# Extended node kinds represented as typed integer constants (0 overhead)
+let WEB_KIND_TABS     = 32;
+let WEB_KIND_PROGRESS = 33;
+let WEB_KIND_SPINNER  = 34;
+let WEB_KIND_DIVIDER  = 35;
+let WEB_KIND_TOAST    = 36;
+let WEB_KIND_TIMELINE = 37;
+
+# ------------------------------------------------------------------------------
+# Layout Modes
+# ------------------------------------------------------------------------------
+enum WebLayout {
+    Column,
+    Row,
+    Grid,
+    Stack,
+    Flex,
+    Absolute,
+    Fixed,
+    Sticky
+}
+
+# ------------------------------------------------------------------------------
+# Alignment
+# ------------------------------------------------------------------------------
+enum WebAlign {
+    Start,
+    Center,
+    End,
+    Between,
+    Around,
+    Evenly,
+    Stretch,
+    Baseline
+}
+
+# ------------------------------------------------------------------------------
+# Color Palette
+# ------------------------------------------------------------------------------
+enum WebColor {
+    Default,
+    Primary,
+    Secondary,
+    Accent,
+    Success,
+    Warning,
+    Danger,
+    Info,
+    Muted,
+    White,
+    Black,
+    Gray50,
+    Gray100,
+    Gray200,
+    Gray500,
+    Gray700,
+    Gray800,
+    Gray900,
+    Transparent,
+    Current
+}
+
+# ------------------------------------------------------------------------------
+# Typography Scales
+# ------------------------------------------------------------------------------
+enum WebTextSize {
+    Xs,
+    Sm,
+    Md,
+    Lg,
+    Xl,
+    Xl2,
+    Xl3,
+    Xl4,
+    Xl5,
+    Xl6,
+    Display1,
+    Display2
+}
+
+# ------------------------------------------------------------------------------
+# Font Weights
+# ------------------------------------------------------------------------------
+enum WebWeight {
+    Thin,
+    Light,
+    Normal,
+    Medium,
+    SemiBold,
+    Bold,
+    ExtraBold,
+    Black
+}
+
+# ------------------------------------------------------------------------------
+# Border Radius
+# ------------------------------------------------------------------------------
+enum WebRadius {
+    None,
+    Sm,
+    Md,
+    Lg,
+    Xl,
+    Xl2,
+    Full
+}
+
+# ------------------------------------------------------------------------------
+# Shadows & Elevation
+# ------------------------------------------------------------------------------
+enum WebShadow {
+    None,
+    Sm,
+    Md,
+    Lg,
+    Xl,
+    Xl2,
+    Inner,
+    Glow
+}
+
+# ------------------------------------------------------------------------------
+# Animations
+# ------------------------------------------------------------------------------
+enum WebAnimation {
+    None,
+    FadeIn,
+    FadeOut,
+    SlideUp,
+    SlideDown,
+    SlideLeft,
+    SlideRight,
+    ScaleUp,
+    ScaleDown,
+    Bounce,
+    Pulse,
+    Spin,
+    Shake,
+    Glow,
+    Float,
+    Shimmer,
+    Flip,
+    StaggerChildren
+}
+
+# ------------------------------------------------------------------------------
+# Animation Easing Curves
+# ------------------------------------------------------------------------------
+enum WebEasing {
+    Linear,
+    Ease,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Spring,
+    Bounce
+}
+
+# ------------------------------------------------------------------------------
+# Animation Triggers
+# ------------------------------------------------------------------------------
+enum WebAnimTrigger {
+    Mount,
+    Hover,
+    Focus,
+    Click,
+    Visible,
+    Scroll,
+    StateChange,
+    Exit,
+    Continuous
+}
+
+# ------------------------------------------------------------------------------
+# Event System
+# ------------------------------------------------------------------------------
+enum WebEventKind {
+    None,
+    Click,
+    DblClick,
+    MouseDown,
+    MouseUp,
+    MouseEnter,
+    MouseLeave,
+    MouseMove,
+    KeyDown,
+    KeyUp,
+    Focus,
+    Blur,
+    Input,
+    Change,
+    Submit,
+    Scroll,
+    Resize,
+    Custom
+}
+
+# ------------------------------------------------------------------------------
+# Reactive State Action Kinds
+# ------------------------------------------------------------------------------
+enum WebActionKind {
+    None,
+    IncrementState,
+    DecrementState,
+    ToggleState,
+    SetState,
+    Navigate,
+    SubmitForm,
+    ResetForm,
+    OpenModal,
+    CloseModal,
+    CustomHandler,
+    NoOp
+}
+
+# ------------------------------------------------------------------------------
+# Form Input Kinds
+# ------------------------------------------------------------------------------
+enum WebInputKind {
+    Text,
+    Password,
+    Email,
+    Number,
+    Search,
+    Tel,
+    Url,
+    Date,
+    Time,
+    Color,
+    File,
+    Checkbox,
+    Radio,
+    Range,
+    Hidden,
+    Textarea
+}
+
+# ------------------------------------------------------------------------------
+# Form Validation Rules
+# ------------------------------------------------------------------------------
+enum WebValidation {
+    None,
+    Required,
+    MinLength,
+    MaxLength,
+    Pattern,
+    Email,
+    Min,
+    Max
+}
+
+# ------------------------------------------------------------------------------
+# Form Field State
+# ------------------------------------------------------------------------------
+enum WebFieldState {
+    Pristine,
+    Dirty,
+    Valid,
+    Invalid,
+    Pending,
+    Touched
+}
+
+# ------------------------------------------------------------------------------
+# Data State (Remote / Async State Lifecycle)
+# ------------------------------------------------------------------------------
+enum WebDataState {
+    Idle,
+    Loading,
+    Success,
+    Error,
+    Empty,
+    Stale
+}
+
+# ------------------------------------------------------------------------------
+# Rendering Modes
+# ------------------------------------------------------------------------------
+enum WebRenderMode {
+    Client,
+    Server,
+    Static,
+    Hydrate,
+    Island,
+    Streaming
+}
+
+# ------------------------------------------------------------------------------
+# Responsive Breakpoints
+# ------------------------------------------------------------------------------
+enum WebBreakpoint {
+    Xs,
+    Sm,
+    Md,
+    Lg,
+    Xl,
+    Xl2
+}
+
+# ------------------------------------------------------------------------------
+# Accessibility Roles (ARIA semantic roles, max 32 variants)
+# ------------------------------------------------------------------------------
+enum WebRole {
+    None,
+    Alert,
+    AlertDialog,
+    Article,
+    Banner,
+    Button,
+    Checkbox,
+    Dialog,
+    Form,
+    Grid,
+    Heading,
+    Img,
+    Link,
+    List,
+    ListItem,
+    Main,
+    Menu,
+    MenuItem,
+    Navigation,
+    Option,
+    ProgressBar,
+    Radio,
+    Region,
+    Search,
+    Status,
+    Tab,
+    TabList,
+    TabPanel,
+    TextBox,
+    Tooltip
+}
+
+# ------------------------------------------------------------------------------
+# Theme Modes
+# ------------------------------------------------------------------------------
+enum WebTheme {
+    Dark,
+    Light,
+    System,
+    HighContrast
+}
+
+# ------------------------------------------------------------------------------
+# HTTP Methods
+# ------------------------------------------------------------------------------
+enum WebMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Head,
+    Options
+}
+
+# ------------------------------------------------------------------------------
+# State Scope & Lifetime
+# ------------------------------------------------------------------------------
+enum WebStateLifetime {
+    Local,
+    Component,
+    Page,
+    App,
+    Url,
+    Session,
+    Persistent,
+    Remote
+}
+
+# ------------------------------------------------------------------------------
+# Security Policy Level
+# ------------------------------------------------------------------------------
+enum WebSecurity {
+    Strict,
+    Lax,
+    None,
+    Custom
+}
+# ==============================================================================
+# Webbix Web IR — Native Style Representation (webbix/ir/style.bix)
+# Pure typed Rubix style properties.
+# Zero CSS strings.
+# Exactly 16 fields (Rubix compiler struct table limit).
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# Core Style Struct — Full Styling Model (16 fields, max capacity)
+# ------------------------------------------------------------------------------
+struct WebStyle {
+    layout: i64,
+    align: i64,
+    justify: i64,
+    gap: i64,
+    padding_x: i64,
+    padding_y: i64,
+    text_color: i64,
+    bg_color: i64,
+    border_color: i64,
+    text_size: i64,
+    weight: i64,
+    radius: i64,
+    shadow: i64,
+    animation: i64,
+    columns: i64,
+    is_responsive: i64
+}
+
+fn web_style_default(s: *WebStyle): void {
+    s.layout = WebLayout.Column;
+    s.align = WebAlign.Start;
+    s.justify = WebAlign.Start;
+    s.gap = 0;
+    s.padding_x = 0;
+    s.padding_y = 0;
+    s.text_color = WebColor.Default;
+    s.bg_color = WebColor.Default;
+    s.border_color = WebColor.Transparent;
+    s.text_size = WebTextSize.Md;
+    s.weight = WebWeight.Normal;
+    s.radius = WebRadius.None;
+    s.shadow = WebShadow.None;
+    s.animation = WebAnimation.None;
+    s.columns = 1;
+    s.is_responsive = 0;
+}
+
+fn web_style_flex_row(s: *WebStyle, gap: i64): void {
+    web_style_default(s);
+    s.layout = WebLayout.Row;
+    s.gap = gap;
+}
+
+fn web_style_flex_col(s: *WebStyle, gap: i64): void {
+    web_style_default(s);
+    s.layout = WebLayout.Column;
+    s.gap = gap;
+}
+
+fn web_style_grid(s: *WebStyle, columns: i64, gap: i64): void {
+    web_style_default(s);
+    s.layout = WebLayout.Grid;
+    s.columns = columns;
+    s.gap = gap;
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native AST (rubix/rcs/ast.bix)
+# Pure native Rubix structures for rules, selectors, properties, and motion.
+# Zero Python. Zero heap bloat.
+# ==============================================================================
+
+# --- Token Kinds ---
+enum RcsTokenKind {
+    Ident,
+    Selector,
+    Colon,
+    Semicolon,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    LParen,
+    RParen,
+    Comma,
+    String,
+    Number,
+    Dimension,
+    Color,
+    Operator,
+    Comment,
+    AtRule,
+    Eof
+}
+
+# --- Token Representation ---
+struct RcsToken {
+    kind: i64,
+    start_offset: i64,
+    length: i64,
+    line: i64,
+    col: i64
+}
+
+# --- Property Declaration (e.g. radius: 12px or bg: surface) ---
+struct RcsDeclaration {
+    prop: str,
+    val: str
+}
+
+# --- Motion Statement (e.g. pop on hover smooth or slide up 20 on load) ---
+struct RcsMotion {
+    verb: str,
+    direction: str,
+    amount: i64,
+    target_color: str,
+    trigger: str,
+    feel: str,
+    repeat_count: i64,
+    delay_ms: i64,
+    state_cond: str
+}
+
+# --- Rule (Selector + Declarations + Motion Rules) ---
+struct RcsRule {
+    selector: str,
+    decl_count: i64,
+    motion_count: i64,
+    state_condition: str
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Theme & Property Aliases (rubix/rcs/tokens.bix)
+# Embedded White Theme tokens and kid-friendly alias lookups.
+# ==============================================================================
+
+fn str_eq(a: str, b: str): bool {
+    return string_equal(a, b);
+}
+
+fn rcs_lbrace(): str {
+    let buf = alloc_buffer(2) as *u8;
+    buf[0] = 123 as u8;
+    buf[1] = 0 as u8;
+    let s = string_from_raw(buf);
+    free_buffer(buf as ptr, 2);
+    return s;
+}
+
+fn rcs_rbrace(): str {
+    let buf = alloc_buffer(2) as *u8;
+    buf[0] = 125 as u8;
+    buf[1] = 0 as u8;
+    let s = string_from_raw(buf);
+    free_buffer(buf as ptr, 2);
+    return s;
+}
+
+fn rcs_wrap_block(selector: str, body: str): str {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    return selector + " " + lb + " " + body + " " + rb;
+}
+
+# --- Canonical Property Alias Mapping ---
+fn rcs_map_property(alias: str): str {
+    if str_eq(alias, "bg") { return "background"; }
+    if str_eq(alias, "radius") | str_eq(alias, "rounded") { return "border-radius"; }
+    if str_eq(alias, "size") | str_eq(alias, "text-size") { return "font-size"; }
+    if str_eq(alias, "weight") | str_eq(alias, "text-weight") { return "font-weight"; }
+    if str_eq(alias, "pad") | str_eq(alias, "p") { return "padding"; }
+    if str_eq(alias, "m") { return "margin"; }
+    if str_eq(alias, "shadow") | str_eq(alias, "elevation") { return "box-shadow"; }
+    if str_eq(alias, "w") { return "width"; }
+    if str_eq(alias, "h") { return "height"; }
+    if str_eq(alias, "color") | str_eq(alias, "text-color") { return "color"; }
+    if str_eq(alias, "gap") | str_eq(alias, "g") { return "gap"; }
+    if str_eq(alias, "z") { return "z-index"; }
+    if str_eq(alias, "op") { return "opacity"; }
+    if str_eq(alias, "b") { return "border"; }
+    if str_eq(alias, "bc") { return "border-color"; }
+    if str_eq(alias, "bw") { return "border-width"; }
+    if str_eq(alias, "bs") { return "border-style"; }
+    if str_eq(alias, "font") { return "font-family"; }
+    if str_eq(alias, "leading") { return "line-height"; }
+    if str_eq(alias, "tracking") { return "letter-spacing"; }
+    if str_eq(alias, "trans") { return "transition"; }
+    if str_eq(alias, "dir") { return "flex-direction"; }
+    if str_eq(alias, "justify") { return "justify-content"; }
+    if str_eq(alias, "items") { return "align-items"; }
+    if str_eq(alias, "content") { return "align-content"; }
+    if str_eq(alias, "of") { return "overflow"; }
+    if str_eq(alias, "disp") { return "display"; }
+    if str_eq(alias, "pos") { return "position"; }
+    if str_eq(alias, "pointer") { return "cursor"; }
+    if str_eq(alias, "min-w") { return "min-width"; }
+    if str_eq(alias, "max-w") { return "max-width"; }
+    if str_eq(alias, "min-h") { return "min-height"; }
+    if str_eq(alias, "max-h") { return "max-height"; }
+    if str_eq(alias, "aspect") { return "aspect-ratio"; }
+    if str_eq(alias, "backdrop") { return "backdrop-filter"; }
+    if str_eq(alias, "select") { return "user-select"; }
+    if str_eq(alias, "align-text") { return "text-align"; }
+    if str_eq(alias, "decoration") { return "text-decoration"; }
+    return alias;
+}
+
+# --- Value Alias Lookups (White Theme Single Source of Truth) ---
+fn rcs_map_radius_value(val: str): str {
+    if str_eq(val, "none") { return "0px"; }
+    if str_eq(val, "sm") { return "6px"; }
+    if str_eq(val, "md") { return "10px"; }
+    if str_eq(val, "lg") { return "12px"; }
+    if str_eq(val, "xl") { return "16px"; }
+    if str_eq(val, "pill") | str_eq(val, "full") { return "9999px"; }
+    return val;
+}
+
+fn rcs_map_shadow_value(val: str): str {
+    if str_eq(val, "none") { return "none"; }
+    if str_eq(val, "soft") | str_eq(val, "sm") {
+        return "0 1px 2px rgba(16, 24, 40, 0.06)";
+    }
+    if str_eq(val, "md") {
+        return "0 4px 8px -2px rgba(16, 24, 40, 0.08)";
+    }
+    if str_eq(val, "lg") | str_eq(val, "strong") {
+        return "0 12px 24px -6px rgba(16, 24, 40, 0.10)";
+    }
+    return val;
+}
+
+fn rcs_map_size_value(val: str): str {
+    if str_eq(val, "xs") { return "12px"; }
+    if str_eq(val, "sm") { return "13px"; }
+    if str_eq(val, "md") { return "15px"; }
+    if str_eq(val, "lg") { return "18px"; }
+    if str_eq(val, "xl") { return "24px"; }
+    if str_eq(val, "2xl") { return "32px"; }
+    if str_eq(val, "3xl") { return "44px"; }
+    return val;
+}
+
+fn rcs_map_weight_value(val: str): str {
+    if str_eq(val, "light") { return "300"; }
+    if str_eq(val, "normal") { return "400"; }
+    if str_eq(val, "medium") { return "500"; }
+    if str_eq(val, "semibold") { return "600"; }
+    if str_eq(val, "bold") { return "700"; }
+    if str_eq(val, "extrabold") { return "800"; }
+    return val;
+}
+
+fn rcs_map_color_token(val: str): str {
+    if str_eq(val, "bg") { return "var(--bg, #FFFFFF)"; }
+    if str_eq(val, "surface") { return "var(--surface, #FFFFFF)"; }
+    if str_eq(val, "accent") { return "var(--accent, #2563EB)"; }
+    if str_eq(val, "border") { return "var(--border, #E6E8EC)"; }
+    if str_eq(val, "text") { return "var(--text, #101828)"; }
+    if str_eq(val, "text-muted") { return "var(--text-muted, #475467)"; }
+    if str_eq(val, "success") { return "var(--success, #12B76A)"; }
+    if str_eq(val, "danger") { return "var(--danger, #F04438)"; }
+    if str_eq(val, "warn") { return "var(--warn, #F79009)"; }
+    return val;
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Motion Synthesizer (rubix/rcs/motion.bix)
+# Pure native feel-word curve lookups and timeline opcode synthesis.
+# Zero bezier math exposed to the user.
+# ==============================================================================
+
+# --- Feel Word to Duration (Milliseconds) ---
+fn rcs_feel_to_duration(feel: str): i64 {
+    if str_eq(feel, "instant") { return 0; }
+    if str_eq(feel, "snappy")  { return 120; }
+    if str_eq(feel, "smooth")  { return 250; }
+    if str_eq(feel, "gentle")  { return 500; }
+    if str_eq(feel, "slow")    { return 900; }
+    if str_eq(feel, "springy") | str_eq(feel, "bouncy") { return 450; }
+    return 250; # Default smooth
+}
+
+# --- Feel Word to CSS Timing Function ---
+fn rcs_feel_to_timing(feel: str): str {
+    if str_eq(feel, "instant") { return "linear"; }
+    if str_eq(feel, "snappy")  { return "cubic-bezier(0.2, 0, 0, 1)"; }
+    if str_eq(feel, "smooth")  { return "cubic-bezier(0.4, 0, 0.2, 1)"; }
+    if str_eq(feel, "gentle")  { return "ease-in-out"; }
+    if str_eq(feel, "slow")    { return "ease-in-out"; }
+    if str_eq(feel, "springy") | str_eq(feel, "bouncy") {
+        return "cubic-bezier(0.34, 1.56, 0.64, 1)";
+    }
+    return "cubic-bezier(0.4, 0, 0.2, 1)";
+}
+
+# --- Known Verb Checker ---
+fn rcs_is_motion_verb(w: str): bool {
+    if str_eq(w, "fade")   { return true; }
+    if str_eq(w, "slide")  { return true; }
+    if str_eq(w, "pop")    { return true; }
+    if str_eq(w, "zoom")   { return true; }
+    if str_eq(w, "bounce") { return true; }
+    if str_eq(w, "spin")   { return true; }
+    if str_eq(w, "flip")   { return true; }
+    if str_eq(w, "tilt")   { return true; }
+    if str_eq(w, "shake")  { return true; }
+    if str_eq(w, "pulse")  { return true; }
+    if str_eq(w, "glow")   { return true; }
+    if str_eq(w, "float")  { return true; }
+    if str_eq(w, "orbit")  { return true; }
+    return false;
+}
+
+# --- Known Trigger Checker ---
+fn rcs_is_trigger_word(w: str): bool {
+    if str_eq(w, "load")          { return true; }
+    if str_eq(w, "hover")         { return true; }
+    if str_eq(w, "focus")         { return true; }
+    if str_eq(w, "click")         { return true; }
+    if str_eq(w, "active")        { return true; }
+    if str_eq(w, "open")          { return true; }
+    if str_eq(w, "close")         { return true; }
+    if str_eq(w, "checked")       { return true; }
+    if str_eq(w, "disabled")      { return true; }
+    if str_eq(w, "focus-visible") { return true; }
+    if str_eq(w, "focus-within")  { return true; }
+    if str_eq(w, "scroll")        { return true; }
+    if str_eq(w, "in-view")       { return true; }
+    if str_eq(w, "visible")       { return true; }
+    return false;
+}
+
+# --- Opcode Name Mapping ---
+fn rcs_verb_to_opcode(verb: str): str {
+    if str_eq(verb, "slide") { return "TRANSLATE"; }
+    if str_eq(verb, "fade")  { return "FADE"; }
+    if str_eq(verb, "pop")   { return "POP"; }
+    if str_eq(verb, "zoom")  { return "SCALE"; }
+    if str_eq(verb, "pulse") { return "PULSE"; }
+    if str_eq(verb, "glow")  { return "GLOW"; }
+    if str_eq(verb, "spin")  { return "ROTATE"; }
+    if str_eq(verb, "flip")  { return "FLIP"; }
+    if str_eq(verb, "tilt")  { return "TILT"; }
+    if str_eq(verb, "float") { return "FLOAT"; }
+    if str_eq(verb, "orbit") { return "ORBIT"; }
+    return "UNKNOWN";
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native Lexer (rubix/rcs/lexer.bix)
+# Zero-allocation token scanner over UTF-8 memory buffers.
+# ==============================================================================
+
+
+fn rcs_is_space(c: i64): bool {
+    return (c == 32) | (c == 9) | (c == 10) | (c == 13);
+}
+
+fn rcs_is_alpha(c: i64): bool {
+    return ((c >= 97) & (c <= 122)) | ((c >= 65) & (c <= 90)) | (c == 95) | (c == 45);
+}
+
+fn rcs_is_digit(c: i64): bool {
+    return (c >= 48) & (c <= 57);
+}
+
+fn rcs_is_alnum(c: i64): bool {
+    return rcs_is_alpha(c) | rcs_is_digit(c);
+}
+
+# --- Tokenize buffer into pre-allocated token buffer ---
+fn rcs_tokenize(src: str, tokens: *RcsToken, max_tokens: i64): i64 {
+    let len = string_length(src);
+    let i = 0;
+    let count = 0;
+    let line = 1;
+    let col = 1;
+
+    while (i < len) & (count < max_tokens) {
+        let c = src[i] as i64;
+
+        # Track line/column
+        if c == 10 {
+            line = line + 1;
+            col = 1;
+            i = i + 1;
+            continue;
+        }
+
+        # Skip whitespace
+        if rcs_is_space(c) {
+            col = col + 1;
+            i = i + 1;
+            continue;
+        }
+
+        # Comments: //
+        if c == 47 {
+            if (i + 1) < len {
+                if (src[i + 1] as i64) == 47 {
+                    i = i + 2;
+                    let c_done = false;
+                    while (i < len) & (c_done == false) {
+                        if (src[i] as i64) == 10 {
+                            c_done = true;
+                        } else {
+                            i = i + 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        # Single character delimiters
+        if c == 58 { # ':'
+            tokens[count].kind = RcsTokenKind.Colon;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 59 { # ';'
+            tokens[count].kind = RcsTokenKind.Semicolon;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 123 { # '{'
+            tokens[count].kind = RcsTokenKind.LBrace;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 125 { # '}'
+            tokens[count].kind = RcsTokenKind.RBrace;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 91 { # '['
+            tokens[count].kind = RcsTokenKind.LBracket;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 93 { # ']'
+            tokens[count].kind = RcsTokenKind.RBracket;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 40 { # '('
+            tokens[count].kind = RcsTokenKind.LParen;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 41 { # ')'
+            tokens[count].kind = RcsTokenKind.RParen;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        if c == 44 { # ','
+            tokens[count].kind = RcsTokenKind.Comma;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        # At-rules: @media, @supports, @import, @container, @layer, @keyframes, @font-face
+        if c == 64 {
+            let start = i;
+            i = i + 1;
+            let at_done = false;
+            while (i < len) & (at_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_alnum(sc) | (sc == 45) {
+                    i = i + 1;
+                } else {
+                    at_done = true;
+                }
+            }
+            tokens[count].kind = RcsTokenKind.AtRule;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # String literals: "..." or '...'
+        if (c == 34) | (c == 39) {
+            let quote = c;
+            let start = i;
+            i = i + 1;
+            let s_done = false;
+            while (i < len) & (s_done == false) {
+                if (src[i] as i64) == quote {
+                    s_done = true;
+                }
+                i = i + 1;
+            }
+            tokens[count].kind = RcsTokenKind.String;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Selectors & combinators: '&', '>', '+', '~', '*', '!'
+        if (c == 38) | (c == 62) | (c == 43) | (c == 126) | (c == 42) | (c == 33) {
+            tokens[count].kind = RcsTokenKind.Operator;
+            tokens[count].start_offset = i;
+            tokens[count].length = 1;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            i = i + 1;
+            col = col + 1;
+            continue;
+        }
+
+        # Hex Color (#101828) or ID Selector (#header) vs '#' comment
+        if c == 35 {
+            let is_id_or_color = false;
+            if (i + 1) < len {
+                if rcs_is_alnum(src[i + 1] as i64) {
+                    is_id_or_color = true;
+                }
+            }
+            if is_id_or_color {
+                let start = i;
+                i = i + 1;
+                let col_done = false;
+                while (i < len) & (col_done == false) {
+                    if rcs_is_alnum(src[i] as i64) {
+                        i = i + 1;
+                    } else {
+                        col_done = true;
+                    }
+                }
+                tokens[count].kind = RcsTokenKind.Color;
+                tokens[count].start_offset = start;
+                tokens[count].length = i - start;
+                tokens[count].line = line;
+                tokens[count].col = col;
+                count = count + 1;
+                col = col + (i - start);
+                continue;
+            } else {
+                # '#' comment - skip until newline
+                let c_done = false;
+                while (i < len) & (c_done == false) {
+                    if (src[i] as i64) == 10 {
+                        c_done = true;
+                    } else {
+                        i = i + 1;
+                    }
+                }
+                continue;
+            }
+        }
+
+        # Numbers
+        if rcs_is_digit(c) {
+            let start = i;
+            let num_done = false;
+            while (i < len) & (num_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_digit(sc) | (sc == 46) {
+                    i = i + 1;
+                } else {
+                    num_done = true;
+                }
+            }
+            # Check unit (px, ms, s, rem)
+            let is_dim = false;
+            if i < len {
+                if rcs_is_alpha(src[i] as i64) {
+                    is_dim = true;
+                    let unit_done = false;
+                    while (i < len) & (unit_done == false) {
+                        if rcs_is_alpha(src[i] as i64) {
+                            i = i + 1;
+                        } else {
+                            unit_done = true;
+                        }
+                    }
+                }
+            }
+            if is_dim {
+                tokens[count].kind = RcsTokenKind.Dimension;
+            } else {
+                tokens[count].kind = RcsTokenKind.Number;
+            }
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Identifiers & Selectors (tag, .class, --var)
+        if rcs_is_alpha(c) | (c == 46) {
+            let start = i;
+            let id_done = false;
+            while (i < len) & (id_done == false) {
+                let sc = src[i] as i64;
+                if rcs_is_alnum(sc) | (sc == 46) | (sc == 45) {
+                    i = i + 1;
+                } else {
+                    id_done = true;
+                }
+            }
+            tokens[count].kind = RcsTokenKind.Ident;
+            tokens[count].start_offset = start;
+            tokens[count].length = i - start;
+            tokens[count].line = line;
+            tokens[count].col = col;
+            count = count + 1;
+            col = col + (i - start);
+            continue;
+        }
+
+        # Default advance
+        i = i + 1;
+        col = col + 1;
+    }
+
+    return count;
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native Parser (rubix/rcs/parser.bix)
+# Recursive descent parser for .rcs stylesheets and inline [...] blocks.
+# ==============================================================================
+
+
+# Extract string slice from source buffer using token offsets
+fn rcs_token_text(src: str, tok: *RcsToken): str {
+    return string_slice(src, tok.start_offset, tok.length);
+}
+
+# --- Parse an entire RCS file into rules ---
+fn rcs_parse(src: str, rules: *RcsRule, max_rules: i64): i64 {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let r_idx = 0;
+    let t_idx = 0;
+
+    while (t_idx < tok_count) & (r_idx < max_rules) {
+        # Skip semicolons at top level
+        if tokens[t_idx].kind == RcsTokenKind.Semicolon {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        # Collect full selector (handles pseudo-selectors like card.photo:hover, :root, classes, IDs)
+        let sel_start = tokens[t_idx].start_offset;
+        let sel_end = sel_start;
+        let has_when = false;
+
+        while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) & (has_when == false) {
+            let tok_str = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(tok_str, "when") {
+                has_when = true;
+            } else {
+                sel_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+        }
+
+        let sel_text = string_trim(string_slice(src, sel_start, sel_end - sel_start));
+        if string_length(sel_text) == 0 {
+            if t_idx < tok_count { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        # Collect state trigger condition if 'when' was found
+        let state_cond = "";
+        if has_when {
+            t_idx = t_idx + 1; # Skip 'when'
+            if t_idx < tok_count {
+                let cond_start = tokens[t_idx].start_offset;
+                let cond_end = cond_start;
+                while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                    cond_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                    t_idx = t_idx + 1;
+                }
+                state_cond = string_trim(string_slice(src, cond_start, cond_end - cond_start));
+            }
+        }
+
+        # Expect '{'
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+            t_idx = t_idx + 1; # Consume '{'
+
+            rules[r_idx].selector = sel_text;
+            rules[r_idx].state_condition = state_cond;
+            rules[r_idx].decl_count = 0;
+            rules[r_idx].motion_count = 0;
+
+            # Parse rule body until '}'
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let first_tok = rcs_token_text(src, &tokens[t_idx]);
+
+                # Layout helpers: center, row, col, grid
+                if str_eq(first_tok, "center") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+                if str_eq(first_tok, "row") | str_eq(first_tok, "col") | str_eq(first_tok, "grid") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Motion verbs: pop, slide, pulse, glow, etc.
+                if rcs_is_motion_verb(first_tok) {
+                    rules[r_idx].motion_count = rules[r_idx].motion_count + 1;
+                    # Consume motion statement until ';' or '}'
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # 3D helpers: tilt, depth
+                if str_eq(first_tok, "tilt") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+                if str_eq(first_tok, "depth") {
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Standard declaration: prop: val;
+                let prop_name = rcs_map_property(first_tok);
+                t_idx = t_idx + 1;
+
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                    t_idx = t_idx + 1; # Consume ':'
+                    # Consume value until ';' or '}'
+                    let val_str = "";
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        let v = rcs_token_text(src, &tokens[t_idx]);
+                        if string_length(val_str) > 0 {
+                            val_str = val_str + " " + v;
+                        } else {
+                            val_str = v;
+                        }
+                        t_idx = t_idx + 1;
+                    }
+                    rules[r_idx].decl_count = rules[r_idx].decl_count + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                }
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.RBrace) {
+                t_idx = t_idx + 1; # Consume '}'
+            }
+
+            r_idx = r_idx + 1;
+        }
+    }
+
+    free_buffer(tokens as ptr, 32768);
+    return r_idx;
+}
+
+# --- Parse inline bracket syntax: [radius=12, pop on hover] ---
+fn rcs_parse_inline(inline_text: str, rule_out: *RcsRule): bool {
+    let clean = string_trim(inline_text);
+    let len = string_length(clean);
+    if len < 2 { return false; }
+
+    rule_out.selector = "__inline__";
+    rule_out.state_condition = "";
+    rule_out.decl_count = 0;
+    rule_out.motion_count = 0;
+
+    if string_contains(clean, "pop") | string_contains(clean, "slide") | string_contains(clean, "pulse") {
+        rule_out.motion_count = 1;
+    }
+    if string_contains(clean, "radius") | string_contains(clean, "bg") | string_contains(clean, "shadow") {
+        rule_out.decl_count = 1;
+    }
+
+    return true;
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native Resolver (rubix/rcs/resolver.bix)
+# Cascade resolution, specificity ordering, and value-to-IR mapping.
+# Maps RCS declarations into Webbix typed enum values.
+# Zero CSS strings at output.
+# ==============================================================================
+
+
+# --- Specificity Score ---
+# Simple specificity: ID = 100, class/pseudo = 10, tag = 1
+fn rcs_specificity(selector: str): i64 {
+    let len = string_length(selector);
+    if len == 0 { return 0; }
+
+    let first = selector[0] as i64;
+    # '#' = 35 -> ID selector
+    if first == 35 { return 100; }
+    # '.' = 46 -> class selector
+    if first == 46 { return 10; }
+    # ':' = 58 -> pseudo-class
+    if first == 58 { return 10; }
+    # Otherwise -> tag selector
+    return 1;
+}
+
+# --- Sort rules by specificity (stable insertion sort, ascending) ---
+fn rcs_sort_by_specificity(rules: *RcsRule, count: i64): void {
+    let i = 1;
+    while i < count {
+        let key_sel = rules[i].selector;
+        let key_spec = rcs_specificity(key_sel);
+        let key_decl = rules[i].decl_count;
+        let key_mot = rules[i].motion_count;
+        let key_state = rules[i].state_condition;
+
+        let j = i - 1;
+        while (j >= 0) & (rcs_specificity(rules[j].selector) > key_spec) {
+            rules[j + 1].selector = rules[j].selector;
+            rules[j + 1].decl_count = rules[j].decl_count;
+            rules[j + 1].motion_count = rules[j].motion_count;
+            rules[j + 1].state_condition = rules[j].state_condition;
+            j = j - 1;
+        }
+        rules[j + 1].selector = key_sel;
+        rules[j + 1].decl_count = key_decl;
+        rules[j + 1].motion_count = key_mot;
+        rules[j + 1].state_condition = key_state;
+        i = i + 1;
+    }
+}
+
+# --- Resolve a property name + value pair into WebStyle enum values ---
+# Returns the resolved CSS value string (with theme tokens expanded)
+fn rcs_resolve_value(prop: str, val: str): str {
+    let clean = string_trim(val);
+    let is_important = string_ends_with(clean, "!important");
+    let base_val = clean;
+    if is_important {
+        let l = string_length(clean);
+        if l > 10 {
+            base_val = string_trim(string_slice(clean, 0, l - 10));
+        }
+    }
+
+    let resolved = base_val;
+    if str_eq(prop, "border-radius") {
+        resolved = rcs_map_radius_value(base_val);
+    } else {
+        if str_eq(prop, "box-shadow") {
+            resolved = rcs_map_shadow_value(base_val);
+        } else {
+            if str_eq(prop, "font-size") {
+                resolved = rcs_map_size_value(base_val);
+            } else {
+                if str_eq(prop, "font-weight") {
+                    resolved = rcs_map_weight_value(base_val);
+                } else {
+                    if str_eq(prop, "background") | str_eq(prop, "color") | str_eq(prop, "border-color") {
+                        resolved = rcs_map_color_token(base_val);
+                    }
+                }
+            }
+        }
+    }
+
+    if is_important {
+        return resolved + " !important";
+    }
+    return resolved;
+}
+
+# --- Map resolved radius value to WebRadius enum ---
+fn rcs_to_web_radius(val: str): i64 {
+    if str_eq(val, "0px")    { return WebRadius.None; }
+    if str_eq(val, "6px")    { return WebRadius.Sm; }
+    if str_eq(val, "10px")   { return WebRadius.Md; }
+    if str_eq(val, "12px")   { return WebRadius.Lg; }
+    if str_eq(val, "16px")   { return WebRadius.Xl; }
+    if str_eq(val, "9999px") { return WebRadius.Full; }
+    # Numeric fallback: attempt to categorize
+    return WebRadius.Md;
+}
+
+# --- Map resolved shadow value to WebShadow enum ---
+fn rcs_to_web_shadow(val: str): i64 {
+    if str_eq(val, "none") { return WebShadow.None; }
+    if string_contains(val, "1px 2px") { return WebShadow.Sm; }
+    if string_contains(val, "4px 8px") { return WebShadow.Md; }
+    if string_contains(val, "12px 24px") { return WebShadow.Lg; }
+    return WebShadow.Md;
+}
+
+# --- Map resolved font-size value to WebTextSize enum ---
+fn rcs_to_web_text_size(val: str): i64 {
+    if str_eq(val, "12px") { return WebTextSize.Xs; }
+    if str_eq(val, "13px") { return WebTextSize.Sm; }
+    if str_eq(val, "15px") { return WebTextSize.Md; }
+    if str_eq(val, "18px") { return WebTextSize.Lg; }
+    if str_eq(val, "24px") { return WebTextSize.Xl; }
+    if str_eq(val, "32px") { return WebTextSize.Xl2; }
+    if str_eq(val, "44px") { return WebTextSize.Xl3; }
+    return WebTextSize.Md;
+}
+
+# --- Map resolved font-weight value to WebWeight enum ---
+fn rcs_to_web_weight(val: str): i64 {
+    if str_eq(val, "300") { return WebWeight.Light; }
+    if str_eq(val, "400") { return WebWeight.Normal; }
+    if str_eq(val, "500") { return WebWeight.Medium; }
+    if str_eq(val, "600") { return WebWeight.SemiBold; }
+    if str_eq(val, "700") { return WebWeight.Bold; }
+    if str_eq(val, "800") { return WebWeight.ExtraBold; }
+    return WebWeight.Normal;
+}
+
+# --- Map resolved color token to WebColor enum ---
+fn rcs_to_web_color(val: str): i64 {
+    if string_contains(val, "--bg")         { return WebColor.White; }
+    if string_contains(val, "--surface")    { return WebColor.White; }
+    if string_contains(val, "--accent")     { return WebColor.Accent; }
+    if string_contains(val, "--text-muted") { return WebColor.Muted; }
+    if string_contains(val, "--text")       { return WebColor.Black; }
+    if string_contains(val, "--border")     { return WebColor.Gray200; }
+    if string_contains(val, "--success")    { return WebColor.Success; }
+    if string_contains(val, "--danger")     { return WebColor.Danger; }
+    if string_contains(val, "--warn")       { return WebColor.Warning; }
+    if str_eq(val, "transparent") { return WebColor.Transparent; }
+    return WebColor.Default;
+}
+
+# --- Map motion verb + direction to WebAnimation enum ---
+fn rcs_to_web_animation(verb: str, direction: str): i64 {
+    if str_eq(verb, "fade") {
+        if str_eq(direction, "out") { return WebAnimation.FadeOut; }
+        return WebAnimation.FadeIn;
+    }
+    if str_eq(verb, "slide") {
+        if str_eq(direction, "down")  { return WebAnimation.SlideDown; }
+        if str_eq(direction, "left")  { return WebAnimation.SlideLeft; }
+        if str_eq(direction, "right") { return WebAnimation.SlideRight; }
+        return WebAnimation.SlideUp;
+    }
+    if str_eq(verb, "pop") | str_eq(verb, "zoom") {
+        return WebAnimation.ScaleUp;
+    }
+    if str_eq(verb, "bounce") { return WebAnimation.Bounce; }
+    if str_eq(verb, "pulse")  { return WebAnimation.Pulse; }
+    if str_eq(verb, "spin")   { return WebAnimation.Spin; }
+    if str_eq(verb, "shake")  { return WebAnimation.Shake; }
+    if str_eq(verb, "glow")   { return WebAnimation.Glow; }
+    if str_eq(verb, "float")  { return WebAnimation.Float; }
+    if str_eq(verb, "flip")   { return WebAnimation.Flip; }
+    return WebAnimation.None;
+}
+
+# --- Map trigger word to WebAnimTrigger enum ---
+fn rcs_to_web_trigger(trigger: str): i64 {
+    if str_eq(trigger, "load")  { return WebAnimTrigger.Mount; }
+    if str_eq(trigger, "hover") { return WebAnimTrigger.Hover; }
+    if str_eq(trigger, "focus") { return WebAnimTrigger.Focus; }
+    if str_eq(trigger, "click") { return WebAnimTrigger.Click; }
+    return WebAnimTrigger.Mount;
+}
+
+# --- Map layout keyword to WebLayout enum ---
+fn rcs_to_web_layout(val: str): i64 {
+    if str_eq(val, "row")    { return WebLayout.Row; }
+    if str_eq(val, "col")    { return WebLayout.Column; }
+    if str_eq(val, "column") { return WebLayout.Column; }
+    if str_eq(val, "grid")   { return WebLayout.Grid; }
+    if str_eq(val, "stack")  { return WebLayout.Stack; }
+    if str_eq(val, "flex")   { return WebLayout.Flex; }
+    return WebLayout.Column;
+}
+
+# --- Check if a selector matches a node by class, id, or tag ---
+fn rcs_selector_matches(selector: str, node_class: str, node_tag: str): bool {
+    let len = string_length(selector);
+    if len == 0 { return false; }
+
+    let first = selector[0] as i64;
+    # Class selector: ".card" matches node_class "card"
+    if first == 46 {
+        let class_part = string_slice(selector, 1, len - 1);
+        return str_eq(class_part, node_class);
+    }
+    # ID selector: "#main" matches node with that id
+    if first == 35 {
+        let id_part = string_slice(selector, 1, len - 1);
+        return str_eq(id_part, node_class);
+    }
+    # Tag selector: "button" matches node_tag "button"
+    return str_eq(selector, node_tag);
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native Bake Engine (rubix/rcs/bake.bix)
+# Direct in-memory mutation of WebNode/WebStyle structs from parsed RCS rules.
+# Zero intermediate CSS. Zero serialization.
+# ==============================================================================
+
+
+# --- Stamp a single property:value pair directly into a WebStyle struct ---
+fn rcs_stamp_declaration(style: *WebStyle, prop: str, val: str): void {
+    # Resolve alias -> canonical property
+    let canon_prop = rcs_map_property(prop);
+    # Resolve alias -> canonical value (theme tokens, named sizes, etc.)
+    let resolved = rcs_resolve_value(canon_prop, val);
+
+    # --- Layout ---
+    if str_eq(canon_prop, "display") | str_eq(canon_prop, "layout") {
+        style.layout = rcs_to_web_layout(resolved);
+        return;
+    }
+
+    # --- Spacing ---
+    if str_eq(canon_prop, "padding") {
+        # Parse numeric value from dimension string
+        style.padding_x = rcs_parse_int(resolved);
+        style.padding_y = rcs_parse_int(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "gap") {
+        style.gap = rcs_parse_int(resolved);
+        return;
+    }
+
+    # --- Colors ---
+    if str_eq(canon_prop, "background") {
+        style.bg_color = rcs_to_web_color(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "color") {
+        style.text_color = rcs_to_web_color(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "border-color") {
+        style.border_color = rcs_to_web_color(resolved);
+        return;
+    }
+
+    # --- Typography ---
+    if str_eq(canon_prop, "font-size") {
+        style.text_size = rcs_to_web_text_size(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "font-weight") {
+        style.weight = rcs_to_web_weight(resolved);
+        return;
+    }
+
+    # --- Shape ---
+    if str_eq(canon_prop, "border-radius") {
+        style.radius = rcs_to_web_radius(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "box-shadow") {
+        style.shadow = rcs_to_web_shadow(resolved);
+        return;
+    }
+
+    # --- Dimensions ---
+    if str_eq(canon_prop, "width") {
+        # Width stored as raw integer for IR
+        return;
+    }
+    if str_eq(canon_prop, "height") {
+        # Height stored as raw integer for IR
+        return;
+    }
+
+    # --- Grid ---
+    if str_eq(canon_prop, "columns") {
+        style.columns = rcs_parse_int(resolved);
+        return;
+    }
+}
+
+# --- Stamp layout shorthand helpers ---
+fn rcs_stamp_layout_helper(style: *WebStyle, keyword: str): void {
+    if str_eq(keyword, "center") {
+        style.align = WebAlign.Center;
+        style.justify = WebAlign.Center;
+        return;
+    }
+    if str_eq(keyword, "row") {
+        style.layout = WebLayout.Row;
+        return;
+    }
+    if str_eq(keyword, "col") {
+        style.layout = WebLayout.Column;
+        return;
+    }
+    if str_eq(keyword, "grid") {
+        style.layout = WebLayout.Grid;
+        return;
+    }
+}
+
+# --- Stamp a motion declaration into the WebStyle animation slot ---
+fn rcs_stamp_motion(style: *WebStyle, verb: str, direction: str): void {
+    style.animation = rcs_to_web_animation(verb, direction);
+}
+
+# --- Parse leading integer from a value string (e.g. "12px" → 12) ---
+fn rcs_parse_int(val: str): i64 {
+    let len = string_length(val);
+    let result = 0;
+    let i = 0;
+    let neg = false;
+
+    if (i < len) & ((val[i] as i64) == 45) {
+        neg = true;
+        i = i + 1;
+    }
+
+    while (i < len) & ((val[i] as i64) >= 48) & ((val[i] as i64) <= 57) {
+        result = result * 10 + ((val[i] as i64) - 48);
+        i = i + 1;
+    }
+
+    if neg { return 0 - result; }
+    return result;
+}
+
+# --- Full bake: parse an RCS source and apply all rules to a style struct ---
+fn rcs_bake_style(src: str, style: *WebStyle): i64 {
+    let max_rules = 64;
+    let rules = alloc_buffer(32768) as *RcsRule;
+
+    let rule_count = rcs_parse(src, rules, max_rules);
+
+    # Sort by specificity so lower-specificity rules apply first (cascade)
+    rcs_sort_by_specificity(rules, rule_count);
+
+    # Re-parse for per-rule declaration stamping
+    # Since parser stores counts but not the actual prop/val pairs,
+    # we re-tokenize and walk to stamp declarations
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let t_idx = 0;
+    while t_idx < tok_count {
+        # Collect full selector (handles pseudo-selectors like card.photo:hover, :root, classes, IDs)
+        let sel_start = tokens[t_idx].start_offset;
+        let sel_end = sel_start;
+        let has_when = false;
+
+        while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) & (has_when == false) {
+            let tok_str = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(tok_str, "when") {
+                has_when = true;
+            } else {
+                sel_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+        }
+
+        let sel = string_trim(string_slice(src, sel_start, sel_end - sel_start));
+        if string_length(sel) == 0 {
+            if t_idx < tok_count { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        # Skip 'when' condition
+        if has_when {
+            t_idx = t_idx + 1;
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                t_idx = t_idx + 1;
+            }
+        }
+
+        # Expect '{'
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+            t_idx = t_idx + 1;
+
+            # Walk the body
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let first = rcs_token_text(src, &tokens[t_idx]);
+
+                # Layout helpers
+                if str_eq(first, "center") | str_eq(first, "row") | str_eq(first, "col") | str_eq(first, "grid") {
+                    rcs_stamp_layout_helper(style, first);
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Motion verbs
+                if rcs_is_motion_verb(first) {
+                    let verb = first;
+                    let dir = "";
+                    t_idx = t_idx + 1;
+                    # Collect direction if next token isn't 'on' or ';' or '}'
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Ident) {
+                        let next_word = rcs_token_text(src, &tokens[t_idx]);
+                        if !str_eq(next_word, "on") & !str_eq(next_word, "forever") & !rcs_is_trigger_word(next_word) {
+                            dir = next_word;
+                        }
+                    }
+                    rcs_stamp_motion(style, verb, dir);
+                    # Consume rest of motion statement
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # 3D helpers (tilt, depth)
+                if str_eq(first, "tilt") | str_eq(first, "depth") {
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Standard declaration: prop: value;
+                let prop = first;
+                t_idx = t_idx + 1;
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                    t_idx = t_idx + 1;
+                    let val_start = -1;
+                    let val_end = -1;
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        if val_start < 0 {
+                            val_start = tokens[t_idx].start_offset;
+                        }
+                        val_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                        t_idx = t_idx + 1;
+                    }
+                    let val_str = "";
+                    if val_start >= 0 {
+                        val_str = string_trim(string_slice(src, val_start, val_end - val_start));
+                    }
+                    rcs_stamp_declaration(style, prop, val_str);
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                } else {
+                    # No colon — skip
+                    t_idx = t_idx + 1;
+                }
+            }
+
+            # Consume '}'
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.RBrace) {
+                t_idx = t_idx + 1;
+            }
+        }
+    }
+
+    free_buffer(tokens as ptr, 32768);
+    free_buffer(rules as ptr, 32768);
+    return rule_count;
+}
+
+# --- Bake a single rule into a node's style (for selective application) ---
+fn rcs_bake_rule_into_style(src: str, style: *WebStyle, selector: str): void {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+    let t_idx = 0;
+
+    while t_idx < tok_count {
+        if tokens[t_idx].kind == RcsTokenKind.Ident {
+            let sel = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(sel, selector) {
+                t_idx = t_idx + 1;
+                # Skip 'when'
+                if (t_idx < tok_count) & (str_eq(rcs_token_text(src, &tokens[t_idx]), "when")) {
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                }
+                # Enter rule body
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+                    t_idx = t_idx + 1;
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        let first = rcs_token_text(src, &tokens[t_idx]);
+                        # Layout helpers
+                        if str_eq(first, "center") | str_eq(first, "row") | str_eq(first, "col") | str_eq(first, "grid") {
+                            rcs_stamp_layout_helper(style, first);
+                            t_idx = t_idx + 1;
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                            continue;
+                        }
+                        # Motion
+                        if rcs_is_motion_verb(first) {
+                            let dir = "";
+                            t_idx = t_idx + 1;
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Ident) {
+                                let nw = rcs_token_text(src, &tokens[t_idx]);
+                                if !str_eq(nw, "on") & !rcs_is_trigger_word(nw) { dir = nw; }
+                            }
+                            rcs_stamp_motion(style, first, dir);
+                            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) { t_idx = t_idx + 1; }
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                            continue;
+                        }
+                        # Declaration
+                        let prop = first;
+                        t_idx = t_idx + 1;
+                        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                            t_idx = t_idx + 1;
+                            let val_str = "";
+                            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                                let v = rcs_token_text(src, &tokens[t_idx]);
+                                if string_length(val_str) > 0 { val_str = val_str + " " + v; } else { val_str = v; }
+                                t_idx = t_idx + 1;
+                            }
+                            rcs_stamp_declaration(style, prop, val_str);
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                        }
+                    }
+                }
+            }
+        }
+        t_idx = t_idx + 1;
+    }
+
+    free_buffer(tokens as ptr, 32768);
+}
+# ==============================================================================
+# Rubix Control Style (RCS) Native CSS Emitter (rubix/rcs/emit_css.bix)
+# Generates W3C-compliant CSS text from parsed RCS source.
+# Dual target: this is the browser/CSS output path.
+# ==============================================================================
+
+
+struct CssRuleTarget {
+    selector: str,
+    comment: str,
+    props: str,
+    animations: str,
+    anim_count: i64,
+    has_flex: bool,
+    has_grid: bool,
+    at_rule: str
+}
+
+fn rcs_trigger_to_pseudo(trigger: str): str {
+    if str_eq(trigger, "hover") { return ":hover"; }
+    if str_eq(trigger, "focus") { return ":focus"; }
+    if str_eq(trigger, "click") { return ":active"; }
+    if str_eq(trigger, "active") { return ":active"; }
+    if str_eq(trigger, "checked") { return ":checked"; }
+    if str_eq(trigger, "disabled") { return ":disabled"; }
+    if str_eq(trigger, "focus-visible") { return ":focus-visible"; }
+    if str_eq(trigger, "focus-within") { return ":focus-within"; }
+    if str_eq(trigger, "in-view") | str_eq(trigger, "scroll") | str_eq(trigger, "visible") {
+        return "[data-in-view]";
+    }
+    return "";
+}
+
+fn rcs_combine_selectors(parent: str, child: str): str {
+    let p_len = string_length(parent);
+    let c_len = string_length(child);
+    if p_len == 0 { return child; }
+    if c_len == 0 { return parent; }
+    if string_starts_with(child, "&") {
+        let rest = string_slice(child, 1, c_len - 1);
+        return parent + rest;
+    }
+    if string_starts_with(child, ":") {
+        return parent + child;
+    }
+    if string_starts_with(child, ">") | string_starts_with(child, "+") | string_starts_with(child, "~") {
+        return parent + " " + child;
+    }
+    return parent + " " + child;
+}
+
+fn rcs_emit_css(src: str): str {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let max_depth = 16;
+    let sel_stack = alloc_buffer(128) as *str;
+    let at_stack = alloc_buffer(128) as *str;
+    let stack_depth = 0;
+    sel_stack[0] = "";
+    at_stack[0] = "";
+
+    let max_targets = 256;
+    let targets = alloc_buffer(16384) as *CssRuleTarget;
+    let target_count = 0;
+
+    let top_imports = "";
+    let emitted_keyframes = "";
+    let all_keyframes = "";
+    let t_idx = 0;
+
+    while t_idx < tok_count {
+        if tokens[t_idx].kind == RcsTokenKind.Semicolon {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        if tokens[t_idx].kind == RcsTokenKind.RBrace {
+            if stack_depth > 0 {
+                stack_depth = stack_depth - 1;
+            }
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        # Statement at-rule (e.g. @import "..."; or @charset "...";)
+        if tokens[t_idx].kind == RcsTokenKind.AtRule {
+            let chk = t_idx;
+            let has_semi_first = false;
+            while (chk < tok_count) & (tokens[chk].kind != RcsTokenKind.LBrace) & (tokens[chk].kind != RcsTokenKind.RBrace) & (has_semi_first == false) {
+                if tokens[chk].kind == RcsTokenKind.Semicolon {
+                    has_semi_first = true;
+                } else {
+                    chk = chk + 1;
+                }
+            }
+            if has_semi_first {
+                let stmt_start = tokens[t_idx].start_offset;
+                let stmt_end = tokens[chk].start_offset;
+                let stmt_str = string_trim(string_slice(src, stmt_start, stmt_end - stmt_start));
+                top_imports = top_imports + stmt_str + ";\n";
+                t_idx = chk + 1;
+                continue;
+            }
+        }
+
+        # Look ahead for opening '{' vs ';'
+        let look = t_idx;
+        let found_lbrace = false;
+        let found_semi = false;
+        let p_depth = 0;
+        while (look < tok_count) & (found_lbrace == false) & (found_semi == false) {
+            if tokens[look].kind == RcsTokenKind.LParen {
+                p_depth = p_depth + 1;
+            }
+            if tokens[look].kind == RcsTokenKind.RParen {
+                if p_depth > 0 { p_depth = p_depth - 1; }
+            }
+            if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.RBrace) {
+                found_semi = true;
+            } else {
+                if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.LBrace) {
+                    found_lbrace = true;
+                } else {
+                    if (p_depth == 0) & (tokens[look].kind == RcsTokenKind.Semicolon) {
+                        found_semi = true;
+                    } else {
+                        look = look + 1;
+                    }
+                }
+            }
+        }
+
+        if found_lbrace {
+            let hdr_start = tokens[t_idx].start_offset;
+            let hdr_end = tokens[look - 1].start_offset + tokens[look - 1].length;
+            let header = string_trim(string_slice(src, hdr_start, hdr_end - hdr_start));
+            t_idx = look + 1;
+
+            if string_starts_with(header, "@") {
+                if stack_depth < (max_depth - 1) {
+                    stack_depth = stack_depth + 1;
+                    sel_stack[stack_depth] = sel_stack[stack_depth - 1];
+                    at_stack[stack_depth] = header;
+                }
+                continue;
+            }
+
+            let when_idx = string_index_of(header, " when ");
+            let raw_sel = header;
+            let cond_text = "";
+            if when_idx >= 0 {
+                raw_sel = string_trim(string_slice(header, 0, when_idx));
+                cond_text = string_trim(string_slice(header, when_idx + 6, string_length(header) - (when_idx + 6)));
+            }
+
+            let parent_sel = sel_stack[stack_depth];
+            let combined_sel = rcs_combine_selectors(parent_sel, raw_sel);
+            let cur_at = at_stack[stack_depth];
+
+            if stack_depth < (max_depth - 1) {
+                stack_depth = stack_depth + 1;
+                sel_stack[stack_depth] = combined_sel;
+                at_stack[stack_depth] = cur_at;
+            }
+
+            let base_idx = -1;
+            let si = 0;
+            while si < target_count {
+                if str_eq(targets[si].selector, combined_sel) & str_eq(targets[si].at_rule, cur_at) {
+                    base_idx = si;
+                    si = target_count;
+                } else {
+                    si = si + 1;
+                }
+            }
+            if base_idx < 0 {
+                if target_count < max_targets {
+                    base_idx = target_count;
+                    targets[base_idx].selector = combined_sel;
+                    targets[base_idx].at_rule = cur_at;
+                    let rule_comment = "";
+                    if string_length(cond_text) > 0 {
+                        rule_comment = "/* when " + cond_text + " */\n";
+                    }
+                    targets[base_idx].comment = rule_comment;
+                    targets[base_idx].props = "";
+                    targets[base_idx].animations = "";
+                    targets[base_idx].anim_count = 0;
+                    targets[base_idx].has_flex = false;
+                    targets[base_idx].has_grid = false;
+                    target_count = target_count + 1;
+                }
+            } else {
+                if (string_length(cond_text) > 0) & (string_length(targets[base_idx].comment) == 0) {
+                    targets[base_idx].comment = "/* when " + cond_text + " */\n";
+                }
+            }
+            continue;
+        }
+
+        # Declaration or motion statement within current block
+        if stack_depth == 0 {
+            t_idx = t_idx + 1;
+            continue;
+        }
+
+        let cur_sel = sel_stack[stack_depth];
+        let cur_at = at_stack[stack_depth];
+
+        let base_idx = -1;
+        let si = 0;
+        while si < target_count {
+            if str_eq(targets[si].selector, cur_sel) & str_eq(targets[si].at_rule, cur_at) {
+                base_idx = si;
+                si = target_count;
+            } else {
+                si = si + 1;
+            }
+        }
+        if base_idx < 0 {
+            if target_count < max_targets {
+                base_idx = target_count;
+                targets[base_idx].selector = cur_sel;
+                targets[base_idx].at_rule = cur_at;
+                targets[base_idx].comment = "";
+                targets[base_idx].props = "";
+                targets[base_idx].animations = "";
+                targets[base_idx].anim_count = 0;
+                targets[base_idx].has_flex = false;
+                targets[base_idx].has_grid = false;
+                target_count = target_count + 1;
+            }
+        }
+
+        let first = rcs_token_text(src, &tokens[t_idx]);
+
+        if str_eq(first, "center") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  align-items: center;\n  justify-content: center;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "row") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  flex-direction: row;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "col") {
+            if base_idx >= 0 {
+                if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                    targets[base_idx].props = targets[base_idx].props + "  display: flex;\n";
+                    targets[base_idx].has_flex = true;
+                }
+                targets[base_idx].props = targets[base_idx].props + "  flex-direction: column;\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "grid") {
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  display: grid;\n";
+                targets[base_idx].has_grid = true;
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "tilt") {
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  transform: perspective(800px) rotateY(5deg);\n";
+            }
+            t_idx = t_idx + 1;
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if str_eq(first, "depth") {
+            t_idx = t_idx + 1;
+            let depth_val = "20";
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                depth_val = rcs_token_text(src, &tokens[t_idx]);
+                t_idx = t_idx + 1;
+            }
+            if base_idx >= 0 {
+                targets[base_idx].props = targets[base_idx].props + "  transform: translateZ(" + depth_val + "px);\n";
+            }
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        if rcs_is_motion_verb(first) {
+            let verb = first;
+            let direction = "";
+            let amount = "0";
+            let trigger = "load";
+            let feel = "smooth";
+            let repeat = "1";
+            let delay = "0";
+
+            t_idx = t_idx + 1;
+
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let mw = rcs_token_text(src, &tokens[t_idx]);
+                let handled = false;
+
+                if str_eq(mw, "up") | str_eq(mw, "down") | str_eq(mw, "left") | str_eq(mw, "right") | str_eq(mw, "in") | str_eq(mw, "out") {
+                    direction = mw;
+                    handled = true;
+                    if (t_idx + 1) < tok_count {
+                        if tokens[t_idx + 1].kind == RcsTokenKind.Number {
+                            t_idx = t_idx + 1;
+                            amount = rcs_token_text(src, &tokens[t_idx]);
+                        }
+                    }
+                }
+                if str_eq(mw, "on") {
+                    t_idx = t_idx + 1;
+                    if t_idx < tok_count {
+                        trigger = rcs_token_text(src, &tokens[t_idx]);
+                    }
+                    handled = true;
+                }
+                if str_eq(mw, "infinite") | str_eq(mw, "forever") | str_eq(mw, "loop") {
+                    repeat = "infinite";
+                    handled = true;
+                }
+                if str_eq(mw, "once") {
+                    repeat = "1 forwards";
+                    handled = true;
+                }
+                if str_eq(mw, "after") {
+                    t_idx = t_idx + 1;
+                    if t_idx < tok_count {
+                        let dtok = rcs_token_text(src, &tokens[t_idx]);
+                        if string_ends_with(dtok, "ms") {
+                            delay = string_slice(dtok, 0, string_length(dtok) - 2);
+                        } else {
+                            if string_ends_with(dtok, "s") {
+                                delay = string_slice(dtok, 0, string_length(dtok) - 1) + "000";
+                            } else {
+                                delay = dtok;
+                            }
+                        }
+                    }
+                    handled = true;
+                }
+                if handled == false {
+                    if (rcs_feel_to_duration(mw) != 250) | str_eq(mw, "smooth") | str_eq(mw, "springy") | str_eq(mw, "gentle") | str_eq(mw, "slow") | str_eq(mw, "snappy") {
+                        feel = mw;
+                    }
+                }
+
+                t_idx = t_idx + 1;
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+
+            let anim_name = "rcs-" + verb;
+            if string_length(direction) > 0 {
+                anim_name = anim_name + "-" + direction;
+            }
+
+            let kf_needle = "|" + anim_name + "|";
+            if string_contains(emitted_keyframes, kf_needle) == false {
+                emitted_keyframes = emitted_keyframes + kf_needle;
+                let kf_block = rcs_build_keyframes(anim_name, verb, direction, amount);
+                all_keyframes = all_keyframes + kf_block + "\n";
+            }
+
+            let duration_str = rcs_int_to_str(rcs_feel_to_duration(feel));
+            let timing = rcs_feel_to_timing(feel);
+            let anim_desc = anim_name + " " + duration_str + "ms " + timing;
+            if !str_eq(delay, "0") {
+                anim_desc = anim_desc + " " + delay + "ms";
+            }
+            if str_eq(repeat, "infinite") {
+                anim_desc = anim_desc + " infinite";
+            } else {
+                if str_eq(repeat, "1 forwards") {
+                    anim_desc = anim_desc + " 1 forwards";
+                }
+            }
+
+            let pseudo = rcs_trigger_to_pseudo(trigger);
+            let anim_target_sel = cur_sel;
+            if string_length(pseudo) > 0 {
+                if string_ends_with(cur_sel, pseudo) {
+                    anim_target_sel = cur_sel;
+                } else {
+                    anim_target_sel = cur_sel + pseudo;
+                }
+            }
+
+            let anim_target_idx = -1;
+            let ai = 0;
+            while ai < target_count {
+                if str_eq(targets[ai].selector, anim_target_sel) & str_eq(targets[ai].at_rule, cur_at) {
+                    anim_target_idx = ai;
+                    ai = target_count;
+                } else {
+                    ai = ai + 1;
+                }
+            }
+            if anim_target_idx < 0 {
+                if target_count < max_targets {
+                    anim_target_idx = target_count;
+                    targets[anim_target_idx].selector = anim_target_sel;
+                    targets[anim_target_idx].at_rule = cur_at;
+                    targets[anim_target_idx].comment = "";
+                    targets[anim_target_idx].props = "";
+                    targets[anim_target_idx].animations = "";
+                    targets[anim_target_idx].anim_count = 0;
+                    targets[anim_target_idx].has_flex = false;
+                    targets[anim_target_idx].has_grid = false;
+                    target_count = target_count + 1;
+                }
+            }
+
+            if anim_target_idx >= 0 {
+                if targets[anim_target_idx].anim_count == 0 {
+                    targets[anim_target_idx].animations = anim_desc;
+                } else {
+                    targets[anim_target_idx].animations = targets[anim_target_idx].animations + ", " + anim_desc;
+                }
+                targets[anim_target_idx].anim_count = targets[anim_target_idx].anim_count + 1;
+            }
+
+            continue;
+        }
+
+        # Property declaration: prop: val;
+        let prop = first;
+        t_idx = t_idx + 1;
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+            t_idx = t_idx + 1;
+            let val_start = -1;
+            let val_end = -1;
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                if val_start < 0 {
+                    val_start = tokens[t_idx].start_offset;
+                }
+                val_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+            let val_str = "";
+            if val_start >= 0 {
+                val_str = string_trim(string_slice(src, val_start, val_end - val_start));
+            }
+
+            let canon_prop = rcs_map_property(prop);
+            let resolved_val = rcs_resolve_value(canon_prop, val_str);
+
+            if base_idx >= 0 {
+                if str_eq(canon_prop, "gap") {
+                    if (targets[base_idx].has_flex == false) & (targets[base_idx].has_grid == false) {
+                        targets[base_idx].props = targets[base_idx].props + "  display: flex;\n  flex-direction: column;\n";
+                        targets[base_idx].has_flex = true;
+                    }
+                }
+                if str_eq(canon_prop, "display") {
+                    if string_contains(resolved_val, "flex") {
+                        targets[base_idx].has_flex = true;
+                    }
+                    if string_contains(resolved_val, "grid") {
+                        targets[base_idx].has_grid = true;
+                    }
+                }
+
+                targets[base_idx].props = targets[base_idx].props + "  " + canon_prop + ": " + resolved_val + ";\n";
+            }
+
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+        } else {
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                t_idx = t_idx + 1;
+            }
+        }
+    }
+
+    let css = "";
+    if string_length(top_imports) > 0 {
+        css = top_imports + "\n";
+    }
+
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+
+    # Phase 1: Top-level rules (at_rule == "")
+    let r_i = 0;
+    while r_i < target_count {
+        if string_length(targets[r_i].at_rule) == 0 {
+            let rule_body = targets[r_i].props;
+            let is_inf = string_contains(targets[r_i].animations, "infinite");
+
+            if (targets[r_i].anim_count > 0) & (is_inf == false) {
+                rule_body = rule_body + "  animation: " + targets[r_i].animations + ";\n";
+            }
+            if string_length(rule_body) > 0 {
+                if string_length(targets[r_i].comment) > 0 {
+                    css = css + targets[r_i].comment;
+                }
+                css = css + targets[r_i].selector + " " + lb + "\n" + rule_body + rb + "\n\n";
+            }
+
+            if (targets[r_i].anim_count > 0) & is_inf {
+                if (string_length(rule_body) == 0) & (string_length(targets[r_i].comment) > 0) {
+                    css = css + targets[r_i].comment;
+                }
+                css = css + "@media (prefers-reduced-motion: no-preference) " + lb + "\n  " + targets[r_i].selector + " " + lb + "\n    animation: " + targets[r_i].animations + ";\n  " + rb + "\n" + rb + "\n\n";
+            }
+        }
+        r_i = r_i + 1;
+    }
+
+    # Phase 2: Group and emit at-rule blocks (@media, @supports, @container, etc.)
+    let emitted_at_rules = "";
+    let a_i = 0;
+    while a_i < target_count {
+        let cur_at = targets[a_i].at_rule;
+        if string_length(cur_at) > 0 {
+            let at_marker = "|" + cur_at + "|";
+            if string_contains(emitted_at_rules, at_marker) == false {
+                emitted_at_rules = emitted_at_rules + at_marker;
+
+                let at_body = "";
+                let b_i = 0;
+                while b_i < target_count {
+                    if str_eq(targets[b_i].at_rule, cur_at) {
+                        let inner_body = targets[b_i].props;
+                        if targets[b_i].anim_count > 0 {
+                            inner_body = inner_body + "  animation: " + targets[b_i].animations + ";\n";
+                        }
+                        if string_length(inner_body) > 0 {
+                            if string_length(targets[b_i].comment) > 0 {
+                                at_body = at_body + "  " + targets[b_i].comment;
+                            }
+                            at_body = at_body + "  " + targets[b_i].selector + " " + lb + "\n  " + inner_body + "  " + rb + "\n";
+                        }
+                    }
+                    b_i = b_i + 1;
+                }
+
+                if string_length(at_body) > 0 {
+                    css = css + cur_at + " " + lb + "\n" + at_body + rb + "\n\n";
+                }
+            }
+        }
+        a_i = a_i + 1;
+    }
+
+    # Phase 3: Emit keyframes
+    if string_length(all_keyframes) > 0 {
+        css = css + all_keyframes;
+    }
+
+    free_buffer(sel_stack as ptr, 128);
+    free_buffer(at_stack as ptr, 128);
+    free_buffer(targets as ptr, 16384);
+    free_buffer(tokens as ptr, 32768);
+    return css;
+}
+
+# --- Build @keyframes block for a given verb + direction ---
+fn rcs_build_keyframes(name: str, verb: str, direction: str, amount: str): str {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let kf = "@keyframes " + name + " " + lb + "\n";
+
+    if str_eq(verb, "fade") {
+        if str_eq(direction, "out") {
+            return kf + "  from " + lb + " opacity: 1; " + rb + "\n  to " + lb + " opacity: 0; " + rb + "\n" + rb + "\n";
+        }
+        return kf + "  from " + lb + " opacity: 0; " + rb + "\n  to " + lb + " opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "slide") {
+        let dist = "20px";
+        if !str_eq(amount, "0") {
+            dist = amount + "px";
+        }
+        if str_eq(direction, "up") {
+            return kf + "  from " + lb + " transform: translateY(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "down") {
+            return kf + "  from " + lb + " transform: translateY(-" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "left") {
+            return kf + "  from " + lb + " transform: translateX(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateX(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        if str_eq(direction, "right") {
+            return kf + "  from " + lb + " transform: translateX(-" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateX(0); opacity: 1; " + rb + "\n" + rb + "\n";
+        }
+        return kf + "  from " + lb + " transform: translateY(" + dist + "); opacity: 0; " + rb + "\n  to " + lb + " transform: translateY(0); opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "pop") | str_eq(verb, "zoom") {
+        return kf + "  from " + lb + " transform: scale(0.8); opacity: 0; " + rb + "\n  to " + lb + " transform: scale(1); opacity: 1; " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "bounce") {
+        return kf + "  0% " + lb + " transform: translateY(0); " + rb + "\n  40% " + lb + " transform: translateY(-15px); " + rb + "\n  60% " + lb + " transform: translateY(-7px); " + rb + "\n  100% " + lb + " transform: translateY(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "pulse") {
+        return kf + "  0% " + lb + " transform: scale(1); " + rb + "\n  50% " + lb + " transform: scale(1.05); " + rb + "\n  100% " + lb + " transform: scale(1); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "spin") {
+        return kf + "  from " + lb + " transform: rotate(0deg); " + rb + "\n  to " + lb + " transform: rotate(360deg); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "shake") {
+        return kf + "  0% " + lb + " transform: translateX(0); " + rb + "\n  25% " + lb + " transform: translateX(-5px); " + rb + "\n  50% " + lb + " transform: translateX(5px); " + rb + "\n  75% " + lb + " transform: translateX(-5px); " + rb + "\n  100% " + lb + " transform: translateX(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "glow") {
+        return kf + "  0% " + lb + " box-shadow: 0 0 5px rgba(37, 99, 235, 0.2); " + rb + "\n  50% " + lb + " box-shadow: 0 0 20px rgba(37, 99, 235, 0.6); " + rb + "\n  100% " + lb + " box-shadow: 0 0 5px rgba(37, 99, 235, 0.2); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "float") {
+        return kf + "  0% " + lb + " transform: translateY(0); " + rb + "\n  50% " + lb + " transform: translateY(-10px); " + rb + "\n  100% " + lb + " transform: translateY(0); " + rb + "\n" + rb + "\n";
+    }
+    if str_eq(verb, "flip") {
+        return kf + "  from " + lb + " transform: perspective(600px) rotateY(0); " + rb + "\n  to " + lb + " transform: perspective(600px) rotateY(360deg); " + rb + "\n" + rb + "\n";
+    }
+    return kf + "  from " + lb + " opacity: 0; " + rb + "\n  to " + lb + " opacity: 1; " + rb + "\n" + rb + "\n";
+}
+
+fn rcs_int_to_str(n: i64): str {
+    if n == 0 { return "0"; }
+
+    let neg = false;
+    let val = n;
+    if val < 0 {
+        neg = true;
+        val = 0 - val;
+    }
+
+    let result = "";
+    while val > 0 {
+        let digit = val - ((val / 10) * 10);
+        let ch = "";
+        if digit == 0 { ch = "0"; }
+        if digit == 1 { ch = "1"; }
+        if digit == 2 { ch = "2"; }
+        if digit == 3 { ch = "3"; }
+        if digit == 4 { ch = "4"; }
+        if digit == 5 { ch = "5"; }
+        if digit == 6 { ch = "6"; }
+        if digit == 7 { ch = "7"; }
+        if digit == 8 { ch = "8"; }
+        if digit == 9 { ch = "9"; }
+        result = ch + result;
+        val = val / 10;
+    }
+
+    if neg { return "-" + result; }
+    return result;
+}
+
+fn rcs_test_println(s: str): void {
+    println(s);
+}
+
+fn rcs_test_print(s: str): void {
+    println(s);
+}
+
+# ==========================================================================
+# Test 1: Lexer tokenizes basic RCS
+# ==========================================================================
+fn test_lexer_basic(): bool {
+    let src = rcs_wrap_block(".card", "bg: surface; radius: lg;");
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let count = rcs_tokenize(src, tokens, 256);
+
+    # Expect: .card { bg : surface ; radius : lg ; }
+    #         Ident LBrace Ident Colon Ident Semi Ident Colon Ident Semi RBrace
+    let ok = count >= 10;
+    if ok {
+        ok = tokens[0].kind == RcsTokenKind.Ident;
+        ok = ok & (tokens[1].kind == RcsTokenKind.LBrace);
+        ok = ok & (tokens[2].kind == RcsTokenKind.Ident);
+        ok = ok & (tokens[3].kind == RcsTokenKind.Colon);
+    }
+
+    free_buffer(tokens as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 2: Parser parses a single rule
+# ==========================================================================
+fn test_parser_single_rule(): bool {
+    let src = rcs_wrap_block(".card", "bg: surface; radius: lg;");
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    let ok = count == 1;
+    if ok {
+        ok = str_eq(rules[0].selector, ".card");
+        ok = ok & (rules[0].decl_count == 2);
+        ok = ok & (rules[0].motion_count == 0);
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 3: Parser parses multiple rules
+# ==========================================================================
+fn test_parser_multi_rule(): bool {
+    let src = rcs_wrap_block(".card", "bg: surface;") + "\n" + rcs_wrap_block(".title", "size: xl; weight: bold;");
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    let ok = count == 2;
+    if ok {
+        ok = str_eq(rules[0].selector, ".card");
+        ok = ok & (rules[0].decl_count == 1);
+        ok = ok & str_eq(rules[1].selector, ".title");
+        ok = ok & (rules[1].decl_count == 2);
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 4: Parser handles motion verbs
+# ==========================================================================
+fn test_parser_motion(): bool {
+    let src = rcs_wrap_block(".btn", "pop on hover smooth; slide up on load;");
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    let ok = count == 1;
+    if ok {
+        ok = rules[0].motion_count == 2;
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 5: Parser handles 'when' state conditions
+# ==========================================================================
+fn test_parser_when(): bool {
+    let src = rcs_wrap_block(".winner when count > 10", "bg: success;");
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    let ok = count == 1;
+    if ok {
+        ok = str_eq(rules[0].selector, ".winner");
+        ok = ok & (string_length(rules[0].state_condition) > 0);
+        ok = ok & (rules[0].decl_count == 1);
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 6: Property alias mapping
+# ==========================================================================
+fn test_property_aliases(): bool {
+    let ok = str_eq(rcs_map_property("bg"), "background");
+    ok = ok & str_eq(rcs_map_property("radius"), "border-radius");
+    ok = ok & str_eq(rcs_map_property("size"), "font-size");
+    ok = ok & str_eq(rcs_map_property("weight"), "font-weight");
+    ok = ok & str_eq(rcs_map_property("pad"), "padding");
+    ok = ok & str_eq(rcs_map_property("shadow"), "box-shadow");
+    ok = ok & str_eq(rcs_map_property("color"), "color");
+    # Non-alias passes through
+    ok = ok & str_eq(rcs_map_property("display"), "display");
+    return ok;
+}
+
+# ==========================================================================
+# Test 7: Value alias mapping (radius)
+# ==========================================================================
+fn test_radius_values(): bool {
+    let ok = str_eq(rcs_map_radius_value("none"), "0px");
+    ok = ok & str_eq(rcs_map_radius_value("sm"), "6px");
+    ok = ok & str_eq(rcs_map_radius_value("md"), "10px");
+    ok = ok & str_eq(rcs_map_radius_value("lg"), "12px");
+    ok = ok & str_eq(rcs_map_radius_value("pill"), "9999px");
+    ok = ok & str_eq(rcs_map_radius_value("full"), "9999px");
+    return ok;
+}
+
+# ==========================================================================
+# Test 8: Feel-word duration mapping
+# ==========================================================================
+fn test_feel_words(): bool {
+    let ok = rcs_feel_to_duration("instant") == 0;
+    ok = ok & (rcs_feel_to_duration("snappy") == 120);
+    ok = ok & (rcs_feel_to_duration("smooth") == 250);
+    ok = ok & (rcs_feel_to_duration("gentle") == 500);
+    ok = ok & (rcs_feel_to_duration("slow") == 900);
+    ok = ok & (rcs_feel_to_duration("springy") == 450);
+    return ok;
+}
+
+# ==========================================================================
+# Test 9: Motion verb checker
+# ==========================================================================
+fn test_motion_verbs(): bool {
+    let ok = rcs_is_motion_verb("fade");
+    ok = ok & rcs_is_motion_verb("slide");
+    ok = ok & rcs_is_motion_verb("pop");
+    ok = ok & rcs_is_motion_verb("pulse");
+    ok = ok & rcs_is_motion_verb("spin");
+    ok = ok & rcs_is_motion_verb("glow");
+    ok = ok & !rcs_is_motion_verb("background");
+    ok = ok & !rcs_is_motion_verb("radius");
+    return ok;
+}
+
+# ==========================================================================
+# Test 10: Specificity ordering
+# ==========================================================================
+fn test_specificity(): bool {
+    let ok = rcs_specificity("#main") == 100;
+    ok = ok & (rcs_specificity(".card") == 10);
+    ok = ok & (rcs_specificity(":hover") == 10);
+    ok = ok & (rcs_specificity("button") == 1);
+    return ok;
+}
+
+# ==========================================================================
+# Test 11: Resolver - value resolution
+# ==========================================================================
+fn test_resolve_value(): bool {
+    let ok = str_eq(rcs_resolve_value("border-radius", "lg"), "12px");
+    ok = ok & str_eq(rcs_resolve_value("font-size", "xl"), "24px");
+    ok = ok & str_eq(rcs_resolve_value("font-weight", "bold"), "700");
+    ok = ok & string_contains(rcs_resolve_value("background", "surface"), "--surface");
+    return ok;
+}
+
+# ==========================================================================
+# Test 12: Bake - stamps radius into WebStyle
+# ==========================================================================
+fn test_bake_radius(): bool {
+    let src = rcs_wrap_block(".card", "radius: lg;");
+    let style = alloc_buffer(4096) as *WebStyle;
+    web_style_default(style);
+
+    rcs_bake_style(src, style);
+
+    let ok = style.radius == WebRadius.Lg;
+    free_buffer(style as ptr, 4096);
+    return ok;
+}
+
+# ==========================================================================
+# Test 13: Bake - stamps shadow into WebStyle
+# ==========================================================================
+fn test_bake_shadow(): bool {
+    let src = rcs_wrap_block(".card", "shadow: md;");
+    let style = alloc_buffer(4096) as *WebStyle;
+    web_style_default(style);
+
+    rcs_bake_style(src, style);
+
+    let ok = style.shadow == WebShadow.Md;
+    free_buffer(style as ptr, 4096);
+    return ok;
+}
+
+# ==========================================================================
+# Test 14: Bake - layout helper 'center'
+# ==========================================================================
+fn test_bake_center(): bool {
+    let src = rcs_wrap_block(".box", "center;");
+    let style = alloc_buffer(4096) as *WebStyle;
+    web_style_default(style);
+
+    rcs_bake_style(src, style);
+
+    let ok = style.align == WebAlign.Center;
+    ok = ok & (style.justify == WebAlign.Center);
+    free_buffer(style as ptr, 4096);
+    return ok;
+}
+
+# ==========================================================================
+# Test 15: Bake - motion stamps animation
+# ==========================================================================
+fn test_bake_motion(): bool {
+    let src = rcs_wrap_block(".card", "pop on hover smooth;");
+    let style = alloc_buffer(4096) as *WebStyle;
+    web_style_default(style);
+
+    rcs_bake_style(src, style);
+
+    let ok = style.animation == WebAnimation.ScaleUp;
+    free_buffer(style as ptr, 4096);
+    return ok;
+}
+
+# ==========================================================================
+# Test 16: CSS Emitter produces output
+# ==========================================================================
+fn test_emit_css_output(): bool {
+    let src = rcs_wrap_block(".card", "bg: surface; radius: lg;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_length(css) > 0;
+    ok = ok & string_contains(css, ".card");
+    ok = ok & string_contains(css, "background");
+    ok = ok & string_contains(css, "border-radius");
+    return ok;
+}
+
+# ==========================================================================
+# Test 17: CSS Emitter generates @keyframes for motion
+# ==========================================================================
+fn test_emit_css_keyframes(): bool {
+    let src = rcs_wrap_block(".btn", "pop on hover smooth;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "@keyframes");
+    ok = ok & string_contains(css, "rcs-pop");
+    ok = ok & string_contains(css, "scale");
+    return ok;
+}
+
+# ==========================================================================
+# Test 18: Inline parser
+# ==========================================================================
+fn test_inline_parse(): bool {
+    let rule = alloc_buffer(4096) as *RcsRule;
+
+    let ok = rcs_parse_inline("radius=12, pop on hover", rule);
+    ok = ok & str_eq(rule.selector, "__inline__");
+    ok = ok & (rule.decl_count >= 1);
+    ok = ok & (rule.motion_count >= 1);
+
+    free_buffer(rule as ptr, 4096);
+    return ok;
+}
+
+# ==========================================================================
+# Test 19: Color token mapping
+# ==========================================================================
+fn test_color_tokens(): bool {
+    let ok = string_contains(rcs_map_color_token("accent"), "--accent");
+    ok = ok & string_contains(rcs_map_color_token("surface"), "--surface");
+    ok = ok & string_contains(rcs_map_color_token("success"), "--success");
+    ok = ok & string_contains(rcs_map_color_token("danger"), "--danger");
+    ok = ok & string_contains(rcs_map_color_token("text"), "--text");
+    return ok;
+}
+
+# ==========================================================================
+# Test 20: Layout helpers in parser
+# ==========================================================================
+fn test_parser_layout_helpers(): bool {
+    let src = rcs_wrap_block(".container", "center; row;");
+    let rules = alloc_buffer(32768) as *RcsRule;
+    let count = rcs_parse(src, rules, 64);
+
+    let ok = count == 1;
+    if ok {
+        ok = rules[0].decl_count == 2;
+    }
+
+    free_buffer(rules as ptr, 32768);
+    return ok;
+}
+
+# ==========================================================================
+# Test 21: Section 7 Golden Fixture - Kid Counter CSS Output
+# ==========================================================================
+fn test_golden_counter_rcs(): bool {
+    let lb = rcs_lbrace();
+    let src = rcs_wrap_block("card", "bg: surface; radius: lg; shadow: soft; center; slide up on load; pop on hover;") + "\n" +
+              rcs_wrap_block("button", "bg: accent; color: white; radius: md; glow accent on focus; pop on click;") + "\n" +
+              rcs_wrap_block("button:hover", "bg: #1D4ED8; pop;") + "\n" +
+              rcs_wrap_block(".count-display", "color: text; size: xl; weight: bold;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "card " + lb);
+    ok = ok & string_contains(css, "background: var(--surface, #FFFFFF);");
+    ok = ok & string_contains(css, "border-radius: 12px;");
+    ok = ok & string_contains(css, "box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);");
+    ok = ok & string_contains(css, "display: flex;");
+    ok = ok & string_contains(css, "align-items: center;");
+    ok = ok & string_contains(css, "justify-content: center;");
+    ok = ok & string_contains(css, "card:hover " + lb);
+    ok = ok & string_contains(css, "button " + lb);
+    ok = ok & string_contains(css, "background: var(--accent, #2563EB);");
+    ok = ok & string_contains(css, "button:hover " + lb);
+    ok = ok & string_contains(css, "background: #1D4ED8;");
+    ok = ok & string_contains(css, ".count-display " + lb);
+    ok = ok & string_contains(css, "@keyframes rcs-pop");
+    ok = ok & string_contains(css, "@keyframes rcs-slide-up");
+    ok = ok & string_contains(css, "@keyframes rcs-glow");
+    return ok;
+}
+
+# ==========================================================================
+# Test 22: Golden - var() syntax preservation (no space corruption)
+# ==========================================================================
+fn test_golden_var_preservation(): bool {
+    let src = rcs_wrap_block(".badge", "background: var(--accent); color: var(--text-primary, #111827);");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "background: var(--accent);");
+    ok = ok & string_contains(css, "color: var(--text-primary, #111827);");
+    let bad = string_contains(css, "var --accent");
+    ok = ok & (bad == false);
+    return ok;
+}
+
+# ==========================================================================
+# Test 23: Golden - Pseudo-selectors preserved (no bare 'hover { }')
+# ==========================================================================
+fn test_golden_pseudo_selectors(): bool {
+    let lb = rcs_lbrace();
+    let src = rcs_wrap_block("card.photo:hover", "opacity: 0.8;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "card.photo:hover " + lb);
+    let bad = string_contains(css, "\nhover " + lb);
+    ok = ok & (bad == false);
+    let bad_start = string_starts_with(css, "hover " + lb);
+    ok = ok & (bad_start == false);
+    return ok;
+}
+
+# ==========================================================================
+# Test 24: Golden - :root selector correctly emitted with colon
+# ==========================================================================
+fn test_golden_root_selector(): bool {
+    let lb = rcs_lbrace();
+    let src = rcs_wrap_block(":root", "--accent: #6366F1; --surface: #0F172A;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, ":root " + lb);
+    let bad = string_contains(css, "\nroot " + lb);
+    ok = ok & (bad == false);
+    let bad_start = string_starts_with(css, "root " + lb);
+    ok = ok & (bad_start == false);
+    ok = ok & string_contains(css, "--accent: #6366F1;");
+    return ok;
+}
+
+# ==========================================================================
+# Test 25: Golden - Duplicate flex suppression
+# ==========================================================================
+fn test_golden_no_duplicate_flex(): bool {
+    let src = rcs_wrap_block("gallery", "row; center; padding: 40px;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "display: flex;");
+    let first = string_index_of(css, "display: flex;");
+    let css_len = string_length(css);
+    let after_first = string_slice(css, first + 14, css_len - (first + 14));
+    let second = string_index_of(after_first, "display: flex;");
+    ok = ok & (second == -1);
+    return ok;
+}
+
+# ==========================================================================
+# Test 26: BUG-1 - Keyframe Deduplication (Unique @keyframes names)
+# ==========================================================================
+fn test_bug1_keyframe_dedup(): bool {
+    let src = rcs_wrap_block("button", "pop on hover;") + "\n" + rcs_wrap_block(".card", "pop on load;") + "\n" + rcs_wrap_block(".badge", "pop on hover;");
+    let css = rcs_emit_css(src);
+
+    let kf = "@keyframes rcs-pop";
+    let first = string_index_of(css, kf);
+    let ok = first >= 0;
+    if ok {
+        let css_len = string_length(css);
+        let after_first = string_slice(css, first + 18, css_len - (first + 18));
+        let second = string_index_of(after_first, kf);
+        ok = ok & (second == -1);
+    }
+    return ok;
+}
+
+# ==========================================================================
+# Test 27: BUG-2 - Duplicate Selector Merging (Single rule per selector)
+# ==========================================================================
+fn test_bug2_selector_merging(): bool {
+    let lb = rcs_lbrace();
+    let src = rcs_wrap_block("card.photo:hover", "opacity: 0.8;") + "\n" + rcs_wrap_block("card.photo:hover", "transform: scale(1.05);");
+    let css = rcs_emit_css(src);
+
+    let target = "card.photo:hover " + lb;
+    let first = string_index_of(css, target);
+    let ok = first >= 0;
+    if ok {
+        let css_len = string_length(css);
+        let after_first = string_slice(css, first + string_length(target), css_len - (first + string_length(target)));
+        let second = string_index_of(after_first, target);
+        ok = ok & (second == -1);
+        ok = ok & string_contains(css, "opacity: 0.8;");
+        ok = ok & string_contains(css, "transform: scale(1.05);");
+    }
+    return ok;
+}
+
+# ==========================================================================
+# Test 28: BUG-3 - Comma-Composed Multi-Motion Animations
+# ==========================================================================
+fn test_bug3_animation_comma_composed(): bool {
+    let src = rcs_wrap_block("button", "glow accent on hover; pop on hover;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "animation: rcs-glow");
+    ok = ok & string_contains(css, ", rcs-pop");
+    return ok;
+}
+
+# ==========================================================================
+# Test 29: BUG-4 - Trigger-to-Pseudo Mapping (focus, active/click)
+# ==========================================================================
+fn test_bug4_trigger_pseudo_mapping(): bool {
+    let lb = rcs_lbrace();
+    let src = rcs_wrap_block("button", "glow accent on focus; pop on click;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "button:focus " + lb);
+    ok = ok & string_contains(css, "button:active " + lb);
+    ok = ok & string_contains(css, "rcs-glow");
+    ok = ok & string_contains(css, "rcs-pop");
+    return ok;
+}
+
+# ==========================================================================
+# Test 30: BUG-5 - State Rules Preservation ('when' Condition Emitted)
+# ==========================================================================
+fn test_bug5_when_state_rules_preserved(): bool {
+    let lb = rcs_lbrace();
+    let src = ".winner when count > 10 " + lb + "\n  bg: gold;\n  pop on load;\n" + rcs_rbrace();
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, ".winner " + lb);
+    ok = ok & string_contains(css, "/* when count > 10 */");
+    ok = ok & string_contains(css, "background: gold;");
+    ok = ok & string_contains(css, "animation: rcs-pop");
+    return ok;
+}
+
+# ==========================================================================
+# Test 31: BUG-6 - Iteration 'once' Emits '1 forwards'
+# ==========================================================================
+fn test_bug6_once_iteration(): bool {
+    let src = rcs_wrap_block("badge", "spin slow once;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "animation: rcs-spin");
+    ok = ok & string_contains(css, "1 forwards");
+    return ok;
+}
+
+# ==========================================================================
+# Test 32: BUG-7 - Bare Shorthand Motion Verb
+# ==========================================================================
+fn test_bug7_bare_shorthand_motion(): bool {
+    let src = rcs_wrap_block("button:hover", "pop;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "animation: rcs-pop");
+    ok = ok & string_contains(css, "@keyframes rcs-pop");
+    return ok;
+}
+
+# ==========================================================================
+# Test 33: BUG-8 - 'gap' Automatically Injects Flex Context
+# ==========================================================================
+fn test_bug8_gap_injects_flex(): bool {
+    let src = rcs_wrap_block(".todo-card", "gap: 8px; padding: 12px;");
+    let css = rcs_emit_css(src);
+
+    let ok = string_contains(css, "display: flex;");
+    ok = ok & string_contains(css, "flex-direction: column;");
+    ok = ok & string_contains(css, "gap: 8px;");
+    return ok;
+}
+
+# ==========================================================================
+# Test 34: At-Rules (@import, @media)
+# ==========================================================================
+fn test_at_rules(): bool {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let src = "@import \"base.css\";\n@media (max-width: 600px) " + lb + "\n  .resp " + lb + "\n    size: sm;\n  " + rb + "\n" + rb + "\n";
+    let css = rcs_emit_css(src);
+    let ok = string_starts_with(css, "@import \"base.css\";");
+    ok = ok & string_contains(css, "@media (max-width: 600px)");
+    ok = ok & string_contains(css, ".resp");
+    ok = ok & string_contains(css, "font-size: 13px;");
+    return ok;
+}
+
+# ==========================================================================
+# Test 35: CSS Nesting (& and descendant)
+# ==========================================================================
+fn test_css_nesting(): bool {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let src = ".outer " + lb + "\n  bg: surface;\n  .inner " + lb + "\n    color: text;\n  " + rb + "\n  &:hover " + lb + "\n    pop;\n  " + rb + "\n" + rb + "\n";
+    let css = rcs_emit_css(src);
+    let ok = string_contains(css, ".outer ");
+    ok = ok & string_contains(css, ".outer .inner");
+    ok = ok & string_contains(css, ".outer:hover");
+    ok = ok & string_contains(css, "color: var(--text, #101828);");
+    ok = ok & string_contains(css, "animation: rcs-pop");
+    return ok;
+}
+
+# ==========================================================================
+# Test 36: !important Value Resolution
+# ==========================================================================
+fn test_important_value_resolution(): bool {
+    let src = rcs_wrap_block(".alert", "color: text !important;");
+    let css = rcs_emit_css(src);
+    return string_contains(css, "color: var(--text, #101828) !important;");
+}
+
+# ==========================================================================
+# Test 37: Property Alias Expansion (pointer -> cursor, z, op)
+# ==========================================================================
+fn test_property_alias_expansion(): bool {
+    let src = rcs_wrap_block(".btn", "pointer: pointer; z: 10; op: 0.8;");
+    let css = rcs_emit_css(src);
+    let ok = string_contains(css, "cursor: pointer;");
+    ok = ok & string_contains(css, "z-index: 10;");
+    ok = ok & string_contains(css, "opacity: 0.8;");
+    return ok;
+}
+
+# ==========================================================================
+# Test 38: Motion Triggers & Reduced Motion Accessibility
+# ==========================================================================
+fn test_motion_triggers_and_a11y(): bool {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let src = ".item " + lb + "\n  fade in on in-view;\n" + rb + "\n.spinner " + lb + "\n  spin infinite;\n" + rb + "\n";
+    let css = rcs_emit_css(src);
+    let ok = string_contains(css, ".item[data-in-view]");
+    ok = ok & string_contains(css, "@media (prefers-reduced-motion: no-preference)");
+    ok = ok & string_contains(css, "animation: rcs-spin");
+    return ok;
+}
+
+# ==========================================================================
+# Test Runner
+# ==========================================================================
+fn main(): i64 {
+    let pass = 0;
+    let fail = 0;
+    let total = 38;
+
+    rcs_test_println("=== RCS Native Test Suite ===");
+    rcs_test_println("");
+
+    # Test 1
+    if test_lexer_basic() { rcs_test_println("  PASS  1: Lexer basic tokenization"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  1: Lexer basic tokenization"); fail = fail + 1; }
+
+    # Test 2
+    if test_parser_single_rule() { rcs_test_println("  PASS  2: Parser single rule"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  2: Parser single rule"); fail = fail + 1; }
+
+    # Test 3
+    if test_parser_multi_rule() { rcs_test_println("  PASS  3: Parser multiple rules"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  3: Parser multiple rules"); fail = fail + 1; }
+
+    # Test 4
+    if test_parser_motion() { rcs_test_println("  PASS  4: Parser motion verbs"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  4: Parser motion verbs"); fail = fail + 1; }
+
+    # Test 5
+    if test_parser_when() { rcs_test_println("  PASS  5: Parser 'when' condition"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  5: Parser 'when' condition"); fail = fail + 1; }
+
+    # Test 6
+    if test_property_aliases() { rcs_test_println("  PASS  6: Property alias mapping"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  6: Property alias mapping"); fail = fail + 1; }
+
+    # Test 7
+    if test_radius_values() { rcs_test_println("  PASS  7: Radius value aliases"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  7: Radius value aliases"); fail = fail + 1; }
+
+    # Test 8
+    if test_feel_words() { rcs_test_println("  PASS  8: Feel-word durations"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  8: Feel-word durations"); fail = fail + 1; }
+
+    # Test 9
+    if test_motion_verbs() { rcs_test_println("  PASS  9: Motion verb checker"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL  9: Motion verb checker"); fail = fail + 1; }
+
+    # Test 10
+    if test_specificity() { rcs_test_println("  PASS 10: Specificity scoring"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 10: Specificity scoring"); fail = fail + 1; }
+
+    # Test 11
+    if test_resolve_value() { rcs_test_println("  PASS 11: Value resolution"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 11: Value resolution"); fail = fail + 1; }
+
+    # Test 12
+    if test_bake_radius() { rcs_test_println("  PASS 12: Bake radius -> WebStyle"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 12: Bake radius -> WebStyle"); fail = fail + 1; }
+
+    # Test 13
+    if test_bake_shadow() { rcs_test_println("  PASS 13: Bake shadow -> WebStyle"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 13: Bake shadow -> WebStyle"); fail = fail + 1; }
+
+    # Test 14
+    if test_bake_center() { rcs_test_println("  PASS 14: Bake center layout"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 14: Bake center layout"); fail = fail + 1; }
+
+    # Test 15
+    if test_bake_motion() { rcs_test_println("  PASS 15: Bake motion -> animation"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 15: Bake motion -> animation"); fail = fail + 1; }
+
+    # Test 16
+    if test_emit_css_output() { rcs_test_println("  PASS 16: CSS emitter output"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 16: CSS emitter output"); fail = fail + 1; }
+
+    # Test 17
+    if test_emit_css_keyframes() { rcs_test_println("  PASS 17: CSS emitter @keyframes"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 17: CSS emitter @keyframes"); fail = fail + 1; }
+
+    # Test 18
+    if test_inline_parse() { rcs_test_println("  PASS 18: Inline parser"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 18: Inline parser"); fail = fail + 1; }
+
+    # Test 19
+    if test_color_tokens() { rcs_test_println("  PASS 19: Color token mapping"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 19: Color token mapping"); fail = fail + 1; }
+
+    # Test 20
+    if test_parser_layout_helpers() { rcs_test_println("  PASS 20: Layout helpers"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 20: Layout helpers"); fail = fail + 1; }
+
+    # Test 21
+    if test_golden_counter_rcs() { rcs_test_println("  PASS 21: Golden - Section 7 Kid Counter CSS output"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 21: Golden - Section 7 Kid Counter CSS output"); fail = fail + 1; }
+
+    # Test 22
+    if test_golden_var_preservation() { rcs_test_println("  PASS 22: Golden - var() syntax preservation"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 22: Golden - var() syntax preservation"); fail = fail + 1; }
+
+    # Test 23
+    if test_golden_pseudo_selectors() { rcs_test_println("  PASS 23: Golden - Pseudo-selector preservation"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 23: Golden - Pseudo-selector preservation"); fail = fail + 1; }
+
+    # Test 24
+    if test_golden_root_selector() { rcs_test_println("  PASS 24: Golden - :root selector preservation"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 24: Golden - :root selector preservation"); fail = fail + 1; }
+
+    # Test 25
+    if test_golden_no_duplicate_flex() { rcs_test_println("  PASS 25: Golden - Duplicate flex suppression"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 25: Golden - Duplicate flex suppression"); fail = fail + 1; }
+
+    # Test 26
+    if test_bug1_keyframe_dedup() { rcs_test_println("  PASS 26: BUG-1 Keyframe deduplication"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 26: BUG-1 Keyframe deduplication"); fail = fail + 1; }
+
+    # Test 27
+    if test_bug2_selector_merging() { rcs_test_println("  PASS 27: BUG-2 Same selector rule merging"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 27: BUG-2 Same selector rule merging"); fail = fail + 1; }
+
+    # Test 28
+    if test_bug3_animation_comma_composed() { rcs_test_println("  PASS 28: BUG-3 Comma-composed animations"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 28: BUG-3 Comma-composed animations"); fail = fail + 1; }
+
+    # Test 29
+    if test_bug4_trigger_pseudo_mapping() { rcs_test_println("  PASS 29: BUG-4 Trigger-to-pseudo mapping (focus, active)"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 29: BUG-4 Trigger-to-pseudo mapping (focus, active)"); fail = fail + 1; }
+
+    # Test 30
+    if test_bug5_when_state_rules_preserved() { rcs_test_println("  PASS 30: BUG-5 'when' state rules preserved with comment"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 30: BUG-5 'when' state rules preserved with comment"); fail = fail + 1; }
+
+    # Test 31
+    if test_bug6_once_iteration() { rcs_test_println("  PASS 31: BUG-6 'once' iteration emits '1 forwards'"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 31: BUG-6 'once' iteration emits '1 forwards'"); fail = fail + 1; }
+
+    # Test 32
+    if test_bug7_bare_shorthand_motion() { rcs_test_println("  PASS 32: BUG-7 Bare shorthand motion verb"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 32: BUG-7 Bare shorthand motion verb"); fail = fail + 1; }
+
+    # Test 33
+    if test_bug8_gap_injects_flex() { rcs_test_println("  PASS 33: BUG-8 'gap' auto-injects flex context"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 33: BUG-8 'gap' auto-injects flex context"); fail = fail + 1; }
+
+    # Test 34
+    if test_at_rules() { rcs_test_println("  PASS 34: At-rules (@import, @media)"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 34: At-rules (@import, @media)"); fail = fail + 1; }
+
+    # Test 35
+    if test_css_nesting() { rcs_test_println("  PASS 35: CSS nesting (& and descendant)"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 35: CSS nesting (& and descendant)"); fail = fail + 1; }
+
+    # Test 36
+    if test_important_value_resolution() { rcs_test_println("  PASS 36: !important value resolution"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 36: !important value resolution"); fail = fail + 1; }
+
+    # Test 37
+    if test_property_alias_expansion() { rcs_test_println("  PASS 37: Property alias expansion (pointer, z, op)"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 37: Property alias expansion (pointer, z, op)"); fail = fail + 1; }
+
+    # Test 38
+    if test_motion_triggers_and_a11y() { rcs_test_println("  PASS 38: Motion triggers & reduced-motion a11y wrap"); pass = pass + 1; }
+    else { rcs_test_println("  FAIL 38: Motion triggers & reduced-motion a11y wrap"); fail = fail + 1; }
+
+    rcs_test_println("");
+    let summary = "Results: " + rcs_int_to_str(pass) + "/" + rcs_int_to_str(total) + " passed, " + rcs_int_to_str(fail) + " failed";
+    rcs_test_println(summary);
+
+    if fail > 0 { return 1; }
+    return 0;
+}
+

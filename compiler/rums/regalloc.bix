@@ -1,0 +1,356 @@
+# regalloc.bix - linear-scan register allocator with loop-depth weighting
+
+# Note: dependencies (machdesc) are imported centrally by main.bix
+
+# ------------------------------------------------------------------------------
+# Live Interval Analysis with Loop-Depth Weighting & Preferred Hints
+# Computes [start_node, end_node, assigned_reg, spill_slot, spill_cost]
+# ------------------------------------------------------------------------------
+fn regalloc_compute_liveness_ex(uir_buf: i64, start_node: i64, end_node: i64, intervals: i64, hints: i64, target: i64): i64 {
+    # Initialize up to 64 virtual registers (64 * 48 = 3072 bytes, fits in 1 page)
+    let vi = 0;
+    while vi < 64 {
+        let base = intervals + (vi * 48);
+        set_qword(base, 0, 0);      # defined = 0
+        set_qword(base, 1, 999999); # start_node
+        set_qword(base, 2, -1);     # end_node
+        set_qword(base, 3, -1);     # assigned_phys_reg = -1 (none)
+        set_qword(base, 4, 0);      # spill_slot
+        set_qword(base, 5, 0);      # spill_cost (weighted use count)
+        if hints > 0 {
+            set_qword(hints, vi, -1); # no hint
+        }
+        vi = vi + 1;
+    }
+
+    let label_nodes = sys_mmap_page();
+    let l_init = 0;
+    while l_init < 512 {
+        set_qword(label_nodes, l_init, -1);
+        l_init = l_init + 1;
+    }
+
+    let ni = start_node;
+    while ni < end_node {
+        let addr = uir_node_addr(uir_buf, ni);
+        let op = get_qword(addr, 0);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let fl = get_qword(addr, 2);
+        let extra = get_qword(addr, 7); # loop depth in slot 7
+        let imm1 = fl & 1;
+        let imm2 = (fl >> 1) & 1;
+
+        let weight = 1;
+        if extra == 1 { weight = 10; }
+        if extra >= 2 { weight = 100; }
+
+        # Check definition (dst)
+        if (op != 50) & (op != 51) & (op != 53) & (op != 54) & (op != 55) {
+            if (dst >= 0) & (dst < 64) {
+                let base_d = intervals + (dst * 48);
+                set_qword(base_d, 0, 1); # defined = 1
+                let cur_start = get_qword(base_d, 1);
+                if ni < cur_start { set_qword(base_d, 1, ni); }
+                let cur_end = get_qword(base_d, 2);
+                if ni > cur_end { set_qword(base_d, 2, ni); }
+
+                # Preferred register hints (queries machine model directly):
+                if (op == 52) & (hints > 0) { # PARAM
+                    let param_reg = -1;
+                    if target >= 65536 { # mach_model pointer
+                        param_reg = mach_model_get_abi_arg_reg(target, s1);
+                    } else { # legacy numeric fallback
+                        if target == 1 {
+                            if s1 == 0 { param_reg = 7; } # RDI
+                            if s1 == 1 { param_reg = 6; } # RSI
+                            if s1 == 2 { param_reg = 2; } # RDX
+                            if s1 == 3 { param_reg = 1; } # RCX
+                            if s1 == 4 { param_reg = 8; } # R8
+                            if s1 == 5 { param_reg = 9; } # R9
+                        }
+                        if target == 2 {
+                            if s1 < 8 { param_reg = s1; } # x0..x7
+                        }
+                        if target == 3 {
+                            if s1 < 8 { param_reg = 10 + s1; } # a0..a7
+                        }
+                    }
+                    if param_reg >= 0 {
+                        set_qword(hints, dst, param_reg);
+                    }
+                }
+                if (op >= 30) & (op <= 35) & (hints > 0) {
+                    set_qword(hints, dst, 0); # Hint comparison result to RAX / x0
+                }
+            }
+        }
+
+        # Check source 1 use
+        let has_s1_vreg = 0;
+        if (op == 2) | (op == 3) { has_s1_vreg = 1; } # MOVE, CAST
+        if (op >= 10) & (op <= 15) { has_s1_vreg = 1; } # Arithmetic
+        if (op >= 20) & (op <= 25) { has_s1_vreg = 1; } # Bitwise
+        if (op >= 30) & (op <= 35) { has_s1_vreg = 1; } # Comparisons
+        if (op >= 42) & (op <= 44) { has_s1_vreg = 1; } # LOAD, STORE, INDEX_ADDR
+        if (op == 55) | (op == 57) | (op == 58) { has_s1_vreg = 1; } # BRANCH, RETURN, ARG
+
+        if (has_s1_vreg == 1) & (imm1 == 0) & (s1 >= 0) & (s1 < 64) {
+            let base_s1 = intervals + (s1 * 48);
+            let cur_start = get_qword(base_s1, 1);
+            if ni < cur_start { set_qword(base_s1, 1, ni); }
+            let cur_end = get_qword(base_s1, 2);
+            if ni > cur_end { set_qword(base_s1, 2, ni); }
+            let cost = get_qword(base_s1, 5);
+            set_qword(base_s1, 5, cost + weight);
+
+            # RETURN hint (queries machine model directly):
+            if (op == 57) & (hints > 0) {
+                let ret_reg = 0; # RAX / x0
+                if target >= 65536 { # mach_model pointer
+                    ret_reg = mach_model_get_abi_return_reg(target);
+                } else {
+                    if target == 3 { ret_reg = 10; } # a0
+                }
+                if ret_reg >= 0 {
+                    set_qword(hints, s1, ret_reg);
+                }
+            }
+        }
+
+        # Check source 2 use
+        let has_s2_vreg = 0;
+        if (op >= 10) & (op <= 14) { has_s2_vreg = 1; } # Binary arithmetic
+        if (op >= 20) & (op <= 22) { has_s2_vreg = 1; } # AND, OR, XOR
+        if (op == 24) | (op == 25) { has_s2_vreg = 1; } # SHL, SHR
+        if (op >= 30) & (op <= 35) { has_s2_vreg = 1; } # Comparisons
+        if (op == 43) | (op == 44) { has_s2_vreg = 1; } # STORE, INDEX_ADDR
+
+        if (has_s2_vreg == 1) & (imm2 == 0) & (s2 >= 0) & (s2 < 64) {
+            let base_s2 = intervals + (s2 * 48);
+            let cur_start = get_qword(base_s2, 1);
+            if ni < cur_start { set_qword(base_s2, 1, ni); }
+            let cur_end = get_qword(base_s2, 2);
+            if ni > cur_end { set_qword(base_s2, 2, ni); }
+            let cost = get_qword(base_s2, 5);
+            set_qword(base_s2, 5, cost + weight);
+        }
+
+        # Track labels for loop back-edge detection
+        if op == 53 { # UIR_LABEL
+            if (dst >= 0) & (dst < 512) {
+                set_qword(label_nodes, dst, ni);
+            }
+        }
+
+        # Detect loop back-edges on backward jumps (UIR_JUMP / UIR_BRANCH)
+        if op == 54 { # UIR_JUMP
+            if (dst >= 0) & (dst < 512) {
+                let target_node = get_qword(label_nodes, dst);
+                if (target_node >= 0) & (target_node < ni) {
+                    let vi = 0;
+                    while vi < 64 {
+                        let base_v = intervals + (vi * 48);
+                        if get_qword(base_v, 0) == 1 {
+                            let v_start = get_qword(base_v, 1);
+                            let v_end = get_qword(base_v, 2);
+                            if (v_start <= target_node) & (v_end >= target_node) {
+                                if v_end < ni {
+                                    set_qword(base_v, 2, ni);
+                                }
+                            }
+                        }
+                        vi = vi + 1;
+                    }
+                }
+            }
+        }
+
+        if op == 55 { # UIR_BRANCH
+            let b_target = -1;
+            if (dst >= 0) & (dst < 512) {
+                let t_node = get_qword(label_nodes, dst);
+                if (t_node >= 0) & (t_node < ni) { b_target = t_node; }
+            }
+            if (s2 >= 0) & (s2 < 512) {
+                let f_node = get_qword(label_nodes, s2);
+                if (f_node >= 0) & (f_node < ni) {
+                    if (b_target < 0) | (f_node < b_target) { b_target = f_node; }
+                }
+            }
+            if b_target >= 0 {
+                let vi = 0;
+                while vi < 64 {
+                    let base_v = intervals + (vi * 48);
+                    if get_qword(base_v, 0) == 1 {
+                        let v_start = get_qword(base_v, 1);
+                        let v_end = get_qword(base_v, 2);
+                        if (v_start <= b_target) & (v_end >= b_target) {
+                            if v_end < ni {
+                                set_qword(base_v, 2, ni);
+                            }
+                        }
+                    }
+                    vi = vi + 1;
+                }
+            }
+        }
+
+        ni = ni + 1;
+    }
+    return 0;
+}
+
+fn regalloc_compute_liveness(uir_buf: i64, start_node: i64, end_node: i64, intervals: i64): i64 {
+    return regalloc_compute_liveness_ex(uir_buf, start_node, end_node, intervals, 0, 1);
+}
+
+# ------------------------------------------------------------------------------
+# Linear-Scan Allocator with Preferred Register Hints & Spill Cost Decisions
+# ------------------------------------------------------------------------------
+fn regalloc_linear_scan_ex(intervals: i64, num_vregs: i64, pool_regs: i64, pool_size: i64, hints: i64): i64 {
+    # Active allocation tracking buffer: [vreg_id, end_node, phys_reg] (3 qwords per entry)
+    let active = sys_mmap_page();
+    let active_count = 0;
+    let next_spill_slot = 1;
+
+    # Reg in use mask (bitmask: bit R is 1 if physical reg R is currently held)
+    let in_use_mask = 0;
+
+    let vi = 0;
+    while vi < num_vregs {
+        let base_v = intervals + (vi * 48);
+        if get_qword(base_v, 0) == 1 { # if defined
+            let start = get_qword(base_v, 1);
+            let end = get_qword(base_v, 2);
+            let cur_cost = get_qword(base_v, 5);
+
+            # 1. Expire old intervals
+            let ai = 0;
+            while ai < active_count {
+                let act_end = get_qword(active, ai * 3 + 1);
+                if act_end <= start {
+                    let freed_reg = get_qword(active, ai * 3 + 2);
+                    let freed_bit = 1 << freed_reg;
+                    if ((in_use_mask >> freed_reg) & 1) == 1 {
+                        in_use_mask = in_use_mask - freed_bit;
+                    }
+
+                    # Remove from active by shifting remaining
+                    let shift_i = ai;
+                    while shift_i < (active_count - 1) {
+                        set_qword(active, shift_i * 3 + 0, get_qword(active, (shift_i + 1) * 3 + 0));
+                        set_qword(active, shift_i * 3 + 1, get_qword(active, (shift_i + 1) * 3 + 1));
+                        set_qword(active, shift_i * 3 + 2, get_qword(active, (shift_i + 1) * 3 + 2));
+                        shift_i = shift_i + 1;
+                    }
+                    active_count = active_count - 1;
+                } else {
+                    ai = ai + 1;
+                }
+            }
+
+            # 2. Try preferred hint first
+            let assigned_reg = -1;
+            if hints > 0 {
+                let pref = get_qword(hints, vi);
+                if pref >= 0 {
+                    # Verify pref is in pool_regs and currently free
+                    let pki = 0;
+                    let in_pool = 0;
+                    while pki < pool_size {
+                        if get_qword(pool_regs, pki) == pref { in_pool = 1; }
+                        pki = pki + 1;
+                    }
+                    if (in_pool == 1) & (((in_use_mask >> pref) & 1) == 0) {
+                        assigned_reg = pref;
+                    }
+                }
+            }
+
+            # 3. If no hint matched, allocate first free register from pool
+            if assigned_reg < 0 {
+                let pi = 0;
+                while (pi < pool_size) & (assigned_reg < 0) {
+                    let cand_reg = get_qword(pool_regs, pi);
+                    if ((in_use_mask >> cand_reg) & 1) == 0 {
+                        assigned_reg = cand_reg;
+                    }
+                    pi = pi + 1;
+                }
+            }
+
+            if assigned_reg >= 0 {
+                # Successfully allocated
+                set_qword(base_v, 3, assigned_reg);
+                in_use_mask = in_use_mask | (1 << assigned_reg);
+                # Add to active set
+                set_qword(active, active_count * 3 + 0, vi);
+                set_qword(active, active_count * 3 + 1, end);
+                set_qword(active, active_count * 3 + 2, assigned_reg);
+                active_count = active_count + 1;
+            } else {
+                # 4. Register pressure: loop-aware spill decision
+                # Find active interval with lowest spill cost
+                let min_cost_idx = -1;
+                let min_cost_val = 999999;
+                let chk_i = 0;
+                while chk_i < active_count {
+                    let act_vid = get_qword(active, chk_i * 3 + 0);
+                    let act_cost = get_qword(intervals + (act_vid * 48), 5);
+                    if act_cost < min_cost_val {
+                        min_cost_val = act_cost;
+                        min_cost_idx = chk_i;
+                    }
+                    chk_i = chk_i + 1;
+                }
+
+                if (min_cost_idx >= 0) & (cur_cost > min_cost_val) {
+                    # Evict lower-cost active interval in favor of current high-priority interval
+                    let evict_vid = get_qword(active, min_cost_idx * 3 + 0);
+                    let evict_reg = get_qword(active, min_cost_idx * 3 + 2);
+                    let base_evict = intervals + (evict_vid * 48);
+
+                    # Spill evicted variable
+                    set_qword(base_evict, 3, -1);
+                    set_qword(base_evict, 4, next_spill_slot);
+                    next_spill_slot = next_spill_slot + 1;
+
+                    # Assign its register to current interval
+                    set_qword(base_v, 3, evict_reg);
+                    set_qword(active, min_cost_idx * 3 + 0, vi);
+                    set_qword(active, min_cost_idx * 3 + 1, end);
+                    set_qword(active, min_cost_idx * 3 + 2, evict_reg);
+                } else {
+                    # Spill current interval
+                    set_qword(base_v, 3, -1);
+                    set_qword(base_v, 4, next_spill_slot);
+                    next_spill_slot = next_spill_slot + 1;
+                }
+            }
+        }
+        vi = vi + 1;
+    }
+
+    return next_spill_slot - 1; # total spilled slots
+}
+
+fn regalloc_linear_scan(intervals: i64, num_vregs: i64, pool_regs: i64, pool_size: i64): i64 {
+    return regalloc_linear_scan_ex(intervals, num_vregs, pool_regs, pool_size, 0);
+}
+
+# Helper to query allocated location:
+# Returns physical register ID (>= 0) or negative stack slot (-slot_idx)
+fn regalloc_get_location(intervals: i64, vreg: i64): i64 {
+    let base = intervals + (vreg * 48);
+    let phys = get_qword(base, 3);
+    if phys >= 0 {
+        return phys;
+    }
+    let slot = get_qword(base, 4);
+    if slot > 0 {
+        return 0 - slot;
+    }
+    return 0 - (vreg + 1); # fallback to 1:1 slot
+}

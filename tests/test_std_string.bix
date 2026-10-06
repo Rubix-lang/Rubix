@@ -1,0 +1,205 @@
+# tests/test_std_string.bix
+# Direct verification of std/string.bix codepoint-aware UTF-8 functions
+
+def is_empty_str(s: String): Boolean do
+    string_length(s) == 0
+end
+
+def repeat_str(s: String, count: Integer): String do
+    if count <= 0 do
+        ""
+    else do
+        s + repeat_str(s, count - 1)
+    end
+end
+
+def pad_left_impl(s: String, pad_char: String, diff: Integer): String do
+    repeat_str(pad_char, diff) + s
+end
+
+def pad_left(s: String, total_len: Integer, pad_char: String): String do
+    if string_length(s) >= total_len do
+        s
+    else do
+        pad_left_impl(s, pad_char, total_len - string_length(s))
+    end
+end
+
+def pad_right_impl(s: String, pad_char: String, diff: Integer): String do
+    s + repeat_str(pad_char, diff)
+end
+
+def pad_right(s: String, total_len: Integer, pad_char: String): String do
+    if string_length(s) >= total_len do
+        s
+    else do
+        pad_right_impl(s, pad_char, total_len - string_length(s))
+    end
+end
+
+def count_substring_loop(s: String, sub: String, sub_len: Integer, limit: Integer): Integer do
+    mut i = 0
+    mut count = 0
+    loop i < limit do
+        if substring(s, i, i + sub_len) == sub do
+            count := count + 1
+            i := i + sub_len
+        else do
+            i := i + 1
+        end
+    end
+    count
+end
+
+def count_substring(s: String, sub: String): Integer do
+    if string_length(sub) == 0 do
+        return 0
+    end
+    if string_length(s) < string_length(sub) do
+        return 0
+    end
+    count_substring_loop(s, sub, string_length(sub), string_length(s) - string_length(sub) + 1)
+end
+
+def is_ascii_only_impl(s: String, s_len: Integer): Boolean do
+    mut i = 0
+    loop i < s_len do
+        if byte_at(s, i) >= 128 do
+            return false
+        end
+        i := i + 1
+    end
+    true
+end
+
+def is_ascii_only(s: String): Boolean do
+    is_ascii_only_impl(s, string_length(s))
+end
+
+def utf8_byte_len(lead_byte: Integer): Integer do
+    if lead_byte < 128 do
+        1
+    else if lead_byte < 192 do
+        1
+    else if lead_byte < 224 do
+        2
+    else if lead_byte < 240 do
+        3
+    else do
+        4
+    end
+end
+
+def string_codepoint_count_impl(s: String, s_len: Integer): Integer do
+    mut count = 0
+    mut i = 0
+    loop i < s_len do
+        i := i + utf8_byte_len(byte_at(s, i))
+        count := count + 1
+    end
+    count
+end
+
+def string_codepoint_count(s: String): Integer do
+    string_codepoint_count_impl(s, string_length(s))
+end
+
+def codepoint_at_impl(s: String, cp_idx: Integer, s_len: Integer): String do
+    mut current_cp = 0
+    mut i = 0
+    loop i < s_len do
+        if current_cp == cp_idx do
+            return char_at(s, i)
+        end
+        i := i + utf8_byte_len(byte_at(s, i))
+        current_cp := current_cp + 1
+    end
+    ""
+end
+
+def codepoint_at(s: String, cp_idx: Integer): String do
+    if cp_idx < 0 do
+        return ""
+    end
+    codepoint_at_impl(s, cp_idx, string_length(s))
+end
+
+fn check_int(actual: Integer, expected: Integer, label: String) {
+    if actual == expected {
+        print "  [PASS] " + label
+    } else {
+        print "  [FAIL] " + label + ": expected " + int_to_string(expected) + " got " + int_to_string(actual)
+    }
+}
+
+fn check_str(actual: String, expected: String, label: String) {
+    if actual == expected {
+        print "  [PASS] " + label
+    } else {
+        print "  [FAIL] " + label + ": expected `" + expected + "` got `" + actual + "`"
+    }
+}
+
+fn check_bool(actual: Boolean, expected: Boolean, label: String) {
+    if actual == expected {
+        print "  [PASS] " + label
+    } else {
+        print "  [FAIL] " + label
+    }
+}
+
+fn main(): Integer {
+    print "=================================================="
+    print "  RUNNING STD/STRING UTF-8 CODEPOINT TEST SUITE"
+    print "=================================================="
+
+    # 1. ASCII-only String
+    let ascii_str = "Rubix 1.0"
+    check_bool(is_ascii_only(ascii_str), true, "is_ascii_only on 'Rubix 1.0' is true")
+    check_int(string_length(ascii_str), 9, "string_length on 'Rubix 1.0' is 9")
+    check_int(string_codepoint_count(ascii_str), 9, "string_codepoint_count on 'Rubix 1.0' is 9")
+    check_str(codepoint_at(ascii_str, 0), "R", "codepoint_at 0 is 'R'")
+    check_str(codepoint_at(ascii_str, 5), " ", "codepoint_at 5 is ' '")
+    check_str(codepoint_at(ascii_str, 8), "0", "codepoint_at 8 is '0'")
+
+    # 2. 2-Byte UTF-8 String ("Café")
+    let utf8_2byte = "Café"
+    check_bool(is_ascii_only(utf8_2byte), false, "is_ascii_only on 'Café' is false")
+    check_int(string_length(utf8_2byte), 5, "string_length on 'Café' is 5 bytes")
+    check_int(string_codepoint_count(utf8_2byte), 4, "string_codepoint_count on 'Café' is 4 codepoints")
+    check_str(codepoint_at(utf8_2byte, 0), "C", "codepoint_at 0 is 'C'")
+    check_str(codepoint_at(utf8_2byte, 3), "é", "codepoint_at 3 is 'é'")
+    check_int(string_length(codepoint_at(utf8_2byte, 3)), 2, "Extracted 'é' scalar occupies 2 bytes")
+
+    # 3. 3-Byte UTF-8 String ("Rubix ⚡")
+    let utf8_3byte = "Rubix ⚡"
+    check_bool(is_ascii_only(utf8_3byte), false, "is_ascii_only on 'Rubix ⚡' is false")
+    check_int(string_length(utf8_3byte), 9, "string_length on 'Rubix ⚡' is 9 bytes")
+    check_int(string_codepoint_count(utf8_3byte), 7, "string_codepoint_count on 'Rubix ⚡' is 7 codepoints")
+    check_str(codepoint_at(utf8_3byte, 6), "⚡", "codepoint_at 6 is '⚡'")
+    check_int(string_length(codepoint_at(utf8_3byte, 6)), 3, "Extracted '⚡' scalar occupies 3 bytes")
+
+    # 4. 4-Byte UTF-8 String with Emoji ("Rubix 🚀")
+    let utf8_4byte = "Rubix 🚀"
+    check_bool(is_ascii_only(utf8_4byte), false, "is_ascii_only on 'Rubix 🚀' is false")
+    check_int(string_length(utf8_4byte), 10, "string_length on 'Rubix 🚀' is 10 bytes")
+    check_int(string_codepoint_count(utf8_4byte), 7, "string_codepoint_count on 'Rubix 🚀' is 7 codepoints")
+    check_str(codepoint_at(utf8_4byte, 6), "🚀", "codepoint_at 6 is '🚀'")
+    check_int(string_length(codepoint_at(utf8_4byte, 6)), 4, "Extracted '🚀' scalar occupies 4 bytes")
+
+    # 5. Out of Bounds & Empty Extraction
+    check_str(codepoint_at(utf8_4byte, -1), "", "Negative codepoint index returns empty string")
+    check_str(codepoint_at(utf8_4byte, 50), "", "Out-of-bounds index returns empty string")
+    check_int(string_codepoint_count(""), 0, "Empty string has 0 codepoints")
+
+    # 6. Existing Formatting Primitives
+    check_str(repeat_str("ab", 3), "ababab", "repeat_str('ab', 3) == 'ababab'")
+    check_str(pad_left("42", 5, "0"), "00042", "pad_left('42', 5, '0') == '00042'")
+    check_str(pad_right("hi", 4, "."), "hi..", "pad_right('hi', 4, '.') == 'hi..'")
+    check_int(count_substring("banana", "an"), 2, "count_substring('banana', 'an') == 2")
+
+    print "=================================================="
+    print "  ALL STD/STRING UTF-8 TESTS COMPLETE"
+    print "=================================================="
+    0
+}

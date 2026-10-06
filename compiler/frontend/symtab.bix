@@ -1,0 +1,1326 @@
+# ==============================================================================
+# Rubix Compiler — Recursive Descent Parser & Code Generator (compiler/frontend/parser.bix)
+# Pure Rubix implementation compiling .bix source into AMD64 machine-code bytes.
+# Operates directly on raw memory buffers without external toolchains or heap GC.
+# ==============================================================================
+
+fn hash_token(src: i64, offset: i64, len: i64): i64 {
+    let h = 5381;
+    let i = 0;
+    while i < len {
+        let b = get_byte(src, offset + i);
+        h = h * 33 + b;
+        i = i + 1;
+    }
+    return h;
+}
+
+# ------------------------------------------------------------------------------
+# Authoritative Memory Layout & Table Buffer Definitions (compiler/common/memory_layout.bix)
+# ------------------------------------------------------------------------------
+let COMPILER_TBL_BUF_SIZE        = 33554432; # 32MB Symbol and metadata table buffer
+let COMPILER_UIR_BUF_SIZE        = 2097152;  # 2MB Universal IR buffer
+let COMPILER_MIR_BUF_SIZE        = 2097152;  # 2MB Mid-level IR buffer
+let COMPILER_CODE_BUF_SIZE       = 2097152;  # 2MB Emitted native code buffer
+let COMPILER_AST_ARENA_SIZE      = 4194304;  # 4MB AST node arena
+let COMPILER_STATE_BUF_SIZE      = 4096;     # 4KB Parser state buffer
+let COMPILER_TOK_BUF_SIZE        = 4096;     # 4KB Streaming token buffer
+
+let TBL_CONST_COUNT_QWORD_IDX    = 11250;    # offset 90,000
+let TBL_CONST_BASE_OFFSET         = 90008;
+let TBL_CONST_ENTRY_SIZE          = 16;
+let TBL_CONST_MAX_CAPACITY        = 4096;
+
+let TBL_STRUCT_COUNT_QWORD_IDX    = 17500;    # offset 140,000
+let TBL_STRUCT_BASE_OFFSET        = 140008;
+let TBL_STRUCT_ENTRY_SIZE         = 800;
+let TBL_STRUCT_MAX_CAPACITY       = 64;
+
+let TBL_ENUM_COUNT_QWORD_IDX      = 25000;    # offset 200,000
+let TBL_ENUM_BASE_OFFSET          = 200008;
+let TBL_ENUM_ENTRY_SIZE           = 1600;
+let TBL_ENUM_MAX_CAPACITY         = 64;
+
+let TBL_VAR_USAGE_QWORD_IDX       = 50000;    # offset 400,000
+let TBL_VAR_USAGE_NEXT_IDX        = 62500;    # offset 500,000
+let TBL_VAR_USAGE_BASE_OFFSET     = 400000;
+let TBL_VAR_USAGE_NEXT_OFFSET     = 500000;
+let TBL_VAR_USAGE_MAX_WORDS       = 8000;
+
+let TBL_EPILOGUE_COUNT_QWORD_IDX  = 77500;    # offset 620,000
+let TBL_EPILOGUE_BASE_OFFSET      = 620008;
+let TBL_EPILOGUE_ENTRY_SIZE       = 8;
+let TBL_EPILOGUE_MAX_CAPACITY     = 4096;
+
+let TBL_VAR_COUNT_QWORD_IDX       = 250000;   # offset 2,000,000
+let TBL_VAR_BASE_OFFSET           = 2000008;
+let TBL_VAR_ENTRY_SIZE            = 48;
+let TBL_VAR_MAX_CAPACITY          = 4096;
+
+let TBL_PATCH_COUNT_QWORD_IDX     = 500000;   # offset 4,000,000
+let TBL_PATCH_BASE_OFFSET         = 4000008;
+let TBL_PATCH_ENTRY_SIZE          = 16;
+let TBL_PATCH_MAX_CAPACITY        = 65536;
+
+let TBL_FUNC_COUNT_QWORD_IDX      = 1000000;  # offset 8,000,000
+let TBL_FUNC_BASE_OFFSET          = 8000008;
+let TBL_FUNC_ENTRY_SIZE           = 192;
+let TBL_FUNC_MAX_CAPACITY         = 8192;
+
+let TBL_FUNC_EXT_PARAMS_OFFSET    = 12000000;
+let TBL_FUNC_EXT_ENTRY_SIZE       = 160;
+
+let TBL_FUNC_PARAM_ARRLEN_OFFSET  = 15000000;
+let TBL_FUNC_ARRLEN_ENTRY_SIZE    = 128;
+
+let TBL_GEN_FUNC_COUNT_QWORD_IDX  = 33750;    # offset 270,000
+let TBL_GEN_FUNC_BASE_OFFSET      = 270008;
+let TBL_GEN_FUNC_ENTRY_SIZE       = 128;
+let TBL_GEN_FUNC_MAX_CAPACITY     = 64;
+
+let TBL_GEN_INST_COUNT_QWORD_IDX  = 35000;    # offset 280,000
+let TBL_GEN_INST_BASE_OFFSET      = 280008;
+let TBL_GEN_INST_ENTRY_SIZE       = 64;
+let TBL_GEN_INST_MAX_CAPACITY     = 128;
+
+let TBL_GEN_BIND_COUNT_QWORD_IDX  = 36250;    # offset 290,000
+let TBL_GEN_BIND_BASE_OFFSET      = 290008;
+let TBL_GEN_BIND_ENTRY_SIZE       = 16;
+let TBL_GEN_BIND_MAX_CAPACITY     = 32;
+
+# ------------------------------------------------------------------------------
+# Struct Table (Metadata for User-Defined Composite Types)
+# Memory Layout in 32MB tbl_buf:
+#   offset TBL_STRUCT_COUNT_QWORD_IDX * 8 (140000): struct_count
+#   offset TBL_STRUCT_BASE_OFFSET (140008) + (struct_id * 800): struct entry
+# ------------------------------------------------------------------------------
+
+fn struct_tbl_find(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, TBL_STRUCT_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_STRUCT_BASE_OFFSET + (i * TBL_STRUCT_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn struct_tbl_get_meta(tbl: i64, struct_id: i64, field_idx: i64): i64 {
+    if struct_id < 0 { return 8; }
+    if struct_id >= TBL_STRUCT_MAX_CAPACITY { return 8; }
+    let base = tbl + TBL_STRUCT_BASE_OFFSET + (struct_id * TBL_STRUCT_ENTRY_SIZE);
+    let v = get_qword(base, field_idx);
+    if field_idx == 1 {
+        if v <= 0 { return 8; }
+    }
+    if field_idx == 2 {
+        if v <= 0 { return 8; }
+    }
+    return v;
+}
+
+fn struct_tbl_set_field(tbl: i64, struct_id: i64, f_idx: i64, f_hash: i64, f_type: i64, f_pointee: i64, offset: i64, sz: i64, arr_len: i64): i64 {
+    if struct_id < 0 { return -1; }
+    if struct_id >= TBL_STRUCT_MAX_CAPACITY { return -1; }
+    if f_idx < 0 { return -1; }
+    if f_idx >= 16 { return -1; }
+    let f_base = tbl + TBL_STRUCT_BASE_OFFSET + (struct_id * TBL_STRUCT_ENTRY_SIZE) + 32 + (f_idx * 48);
+    set_qword(f_base, 0, f_hash);
+    set_qword(f_base, 1, f_type);
+    set_qword(f_base, 2, f_pointee);
+    set_qword(f_base, 3, offset);
+    set_qword(f_base, 4, sz);
+    set_qword(f_base, 5, arr_len);
+    return 0;
+}
+
+fn struct_tbl_find_field(tbl: i64, struct_id: i64, f_hash: i64): i64 {
+    if struct_id < 0 { return -1; }
+    if struct_id >= TBL_STRUCT_MAX_CAPACITY { return -1; }
+    let base = tbl + TBL_STRUCT_BASE_OFFSET + (struct_id * TBL_STRUCT_ENTRY_SIZE);
+    let field_cnt = get_qword(base, 3);
+    let i = 0;
+    while i < field_cnt {
+        let f_base = base + 32 + (i * 48);
+        if get_qword(f_base, 0) == f_hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn struct_tbl_get_field_info(tbl: i64, struct_id: i64, f_idx: i64, info_idx: i64): i64 {
+    if struct_id < 0 { return 0; }
+    if struct_id >= TBL_STRUCT_MAX_CAPACITY { return 0; }
+    if f_idx < 0 { return 0; }
+    if f_idx >= 16 { return 0; }
+    let f_base = tbl + TBL_STRUCT_BASE_OFFSET + (struct_id * TBL_STRUCT_ENTRY_SIZE) + 32 + (f_idx * 48);
+    return get_qword(f_base, info_idx);
+}
+
+# ------------------------------------------------------------------------------
+# Enum Table (Metadata for User-Defined Enumerations)
+# Memory Layout in 32MB tbl_buf:
+#   offset TBL_ENUM_COUNT_QWORD_IDX * 8 (200000): enum_count
+#   offset TBL_ENUM_BASE_OFFSET (200008) + (enum_id * 1600): enum entry
+# ------------------------------------------------------------------------------
+
+fn enum_tbl_find(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, TBL_ENUM_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_ENUM_BASE_OFFSET + (i * TBL_ENUM_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn enum_tbl_add(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, TBL_ENUM_COUNT_QWORD_IDX);
+    if count >= TBL_ENUM_MAX_CAPACITY {
+        return -1;
+    }
+    let base = tbl + TBL_ENUM_BASE_OFFSET + (count * TBL_ENUM_ENTRY_SIZE);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, 0); # variant_count
+    set_qword(base, 2, 0); # has_payload
+    set_qword(base, 3, 0);
+    set_qword(tbl, TBL_ENUM_COUNT_QWORD_IDX, count + 1);
+    return count;
+}
+
+fn enum_tbl_set_variant(tbl: i64, enum_id: i64, v_idx: i64, v_hash: i64, disc_val: i64, payload_cnt: i64, p_type: i64): i64 {
+    if enum_id < 0 { return -1; }
+    if enum_id >= TBL_ENUM_MAX_CAPACITY { return -1; }
+    if v_idx < 0 { return -1; }
+    if v_idx >= 32 { return -1; }
+    let base = tbl + TBL_ENUM_BASE_OFFSET + (enum_id * TBL_ENUM_ENTRY_SIZE);
+    let v_base = base + 32 + (v_idx * 48);
+    set_qword(v_base, 0, v_hash);
+    set_qword(v_base, 1, disc_val);
+    set_qword(v_base, 2, payload_cnt);
+    set_qword(v_base, 3, p_type);
+    set_qword(v_base, 4, 0);
+    set_qword(v_base, 5, 0);
+    let cur_vc = get_qword(base, 1);
+    if (v_idx + 1) > cur_vc {
+        set_qword(base, 1, v_idx + 1);
+    }
+    if payload_cnt > 0 {
+        set_qword(base, 2, 1);
+    }
+    return 0;
+}
+
+fn enum_tbl_find_variant(tbl: i64, enum_id: i64, v_hash: i64): i64 {
+    if enum_id < 0 { return -1; }
+    if enum_id >= TBL_ENUM_MAX_CAPACITY { return -1; }
+    let base = tbl + TBL_ENUM_BASE_OFFSET + (enum_id * TBL_ENUM_ENTRY_SIZE);
+    let vc = get_qword(base, 1);
+    let i = 0;
+    while i < vc {
+        let v_base = base + 32 + (i * 48);
+        if get_qword(v_base, 0) == v_hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn enum_tbl_get_variant_val(tbl: i64, enum_id: i64, v_idx: i64): i64 {
+    if enum_id < 0 { return 0; }
+    if enum_id >= TBL_ENUM_MAX_CAPACITY { return 0; }
+    if v_idx < 0 { return 0; }
+    if v_idx >= 32 { return 0; }
+    let base = tbl + TBL_ENUM_BASE_OFFSET + (enum_id * TBL_ENUM_ENTRY_SIZE);
+    let v_base = base + 32 + (v_idx * 48);
+    return get_qword(v_base, 1);
+}
+
+# ------------------------------------------------------------------------------
+# Symbol Tables (Const, Func, Call Patch, Var, Epilogue Patch)
+# Memory Layout in 32MB tbl_buf (allocated via sys_mmap at startup):
+#   const_tbl:        TBL_CONST_BASE_OFFSET (90008) .. 139999
+#   func_tbl:         TBL_FUNC_BASE_OFFSET (8000008) .. 11999999
+#   patch_tbl:        TBL_PATCH_BASE_OFFSET (4000008) .. 7999999
+#   var_tbl:          TBL_VAR_BASE_OFFSET (2000008) .. 3999999
+#   epilogue_patches: TBL_EPILOGUE_BASE_OFFSET (620008) .. 652767
+# ------------------------------------------------------------------------------
+
+fn const_tbl_add(tbl: i64, hash: i64, val: i64): i64 {
+    let count = get_qword(tbl, TBL_CONST_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_CONST_BASE_OFFSET + (i * TBL_CONST_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            set_qword(base, 1, val);
+            return 0;
+        }
+        i = i + 1;
+    }
+    if count >= TBL_CONST_MAX_CAPACITY {
+        return -30;
+    }
+    let base = tbl + TBL_CONST_BASE_OFFSET + (count * TBL_CONST_ENTRY_SIZE);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, val);
+    set_qword(tbl, TBL_CONST_COUNT_QWORD_IDX, count + 1);
+    return 0;
+}
+
+fn const_tbl_lookup(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, TBL_CONST_COUNT_QWORD_IDX);
+    let i = 0;
+    set_qword(tbl, 31000, 0);
+    while i < count {
+        let base = tbl + TBL_CONST_BASE_OFFSET + (i * TBL_CONST_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            set_qword(tbl, 31000, 1);
+            return get_qword(base, 1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn type_alias_add(tbl: i64, hash: i64, type_id: i64): i64 {
+    let count = get_qword(tbl, 12500);
+    let i = 0;
+    while i < count {
+        let base = tbl + 100008 + (i * 16);
+        if get_qword(base, 0) == hash {
+            set_qword(base, 1, type_id);
+            return 0;
+        }
+        i = i + 1;
+    }
+    if count >= 1023 { return -30; }
+    let base = tbl + 100008 + (count * 16);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, type_id);
+    set_qword(tbl, 12500, count + 1);
+    return 0;
+}
+
+fn type_alias_find(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, 12500);
+    let i = 0;
+    while i < count {
+        let base = tbl + 100008 + (i * 16);
+        if get_qword(base, 0) == hash {
+            return get_qword(base, 1);
+        }
+        i = i + 1;
+    }
+    return -999999999;
+}
+
+fn func_tbl_find_index(tbl: i64, hash: i64): i64 {
+    let count = get_qword(tbl, TBL_FUNC_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (i * TBL_FUNC_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn func_tbl_add(tbl: i64, hash: i64, code_offset: i64, num_params: i64, ret_type: i64): i64 {
+    let count = get_qword(tbl, TBL_FUNC_COUNT_QWORD_IDX);
+    let existing = func_tbl_find_index(tbl, hash);
+    if existing >= 0 {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (existing * TBL_FUNC_ENTRY_SIZE);
+        if code_offset >= 0 {
+            set_qword(base, 1, code_offset);
+        }
+        set_qword(base, 2, num_params);
+        set_qword(base, 3, ret_type);
+        return existing;
+    }
+    if count >= TBL_FUNC_MAX_CAPACITY {
+        return -31;
+    }
+    let base = tbl + TBL_FUNC_BASE_OFFSET + (count * TBL_FUNC_ENTRY_SIZE);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, code_offset);
+    set_qword(base, 2, num_params);
+    set_qword(base, 3, ret_type);
+    let p = 0;
+    while p < 6 {
+        set_qword(base, 4 + p, TYPE_I64);
+        set_qword(base, 10 + p, TYPE_NONE);
+        set_qword(base, 16 + p, PROV_UNKNOWN);
+        p = p + 1;
+    }
+    set_qword(base, 22, TYPE_NONE);
+    set_qword(base, 23, PROV_UNKNOWN);
+    let p_ext = 0;
+    while p_ext < 10 {
+        let ext_base = tbl + TBL_FUNC_EXT_PARAMS_OFFSET + (count * TBL_FUNC_EXT_ENTRY_SIZE) + (p_ext * 16);
+        set_qword(ext_base, 0, TYPE_I64);
+        set_qword(ext_base, 1, TYPE_NONE);
+        p_ext = p_ext + 1;
+    }
+    set_qword(tbl, TBL_FUNC_COUNT_QWORD_IDX, count + 1);
+    return count;
+}
+
+fn func_tbl_set_param_type(tbl: i64, fn_idx: i64, p_idx: i64, p_type: i64): i64 {
+    if fn_idx < 0 { return -1; }
+    if fn_idx >= TBL_FUNC_MAX_CAPACITY { return -1; }
+    if p_idx < 0 { return -1; }
+    if p_idx >= 16 { return -1; }
+    if p_idx < 6 {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (fn_idx * TBL_FUNC_ENTRY_SIZE);
+        set_qword(base, 4 + p_idx, p_type);
+        return 0;
+    }
+    let ext_base = tbl + TBL_FUNC_EXT_PARAMS_OFFSET + (fn_idx * TBL_FUNC_EXT_ENTRY_SIZE) + ((p_idx - 6) * 16);
+    set_qword(ext_base, 0, p_type);
+    return 0;
+}
+
+fn func_tbl_set_param_metadata(tbl: i64, fn_idx: i64, p_idx: i64, pointee_type: i64, provenance: i64): i64 {
+    if fn_idx < 0 { return -1; }
+    if fn_idx >= TBL_FUNC_MAX_CAPACITY { return -1; }
+    if p_idx < 0 { return -1; }
+    if p_idx >= 16 { return -1; }
+    if p_idx < 6 {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (fn_idx * TBL_FUNC_ENTRY_SIZE);
+        set_qword(base, 10 + p_idx, pointee_type);
+        set_qword(base, 16 + p_idx, provenance);
+        return 0;
+    }
+    let ext_base = tbl + TBL_FUNC_EXT_PARAMS_OFFSET + (fn_idx * TBL_FUNC_EXT_ENTRY_SIZE) + ((p_idx - 6) * 16);
+    set_qword(ext_base, 1, pointee_type);
+    return 0;
+}
+
+fn func_tbl_get_param_info(tbl: i64, hash: i64, p_idx: i64, info_idx: i64): i64 {
+    let fn_idx = func_tbl_find_index(tbl, hash);
+    if fn_idx < 0 {
+        if info_idx == 0 { return TYPE_I64; }
+        return 0;
+    }
+    if p_idx < 0 {
+        if info_idx == 0 { return TYPE_I64; }
+        return 0;
+    }
+    if info_idx == 2 {
+        if p_idx >= 16 { return 0; }
+        let base = tbl + TBL_FUNC_PARAM_ARRLEN_OFFSET + (fn_idx * TBL_FUNC_ARRLEN_ENTRY_SIZE) + (p_idx * 8);
+        return get_qword(base, 0);
+    }
+    if p_idx < 6 {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (fn_idx * TBL_FUNC_ENTRY_SIZE);
+        if info_idx == 0 { return get_qword(base, 4 + p_idx); }
+        return get_qword(base, 10 + p_idx);
+    }
+    if p_idx < 16 {
+        let ext_base = tbl + TBL_FUNC_EXT_PARAMS_OFFSET + (fn_idx * TBL_FUNC_EXT_ENTRY_SIZE) + ((p_idx - 6) * 16);
+        return get_qword(ext_base, info_idx);
+    }
+    if info_idx == 0 { return TYPE_I64; }
+    return 0;
+}
+
+fn func_tbl_set_param_array_len(tbl: i64, fn_idx: i64, p_idx: i64, arr_len: i64): i64 {
+    if fn_idx < 0 { return -1; }
+    if fn_idx >= TBL_FUNC_MAX_CAPACITY { return -1; }
+    if p_idx < 0 { return -1; }
+    if p_idx >= 16 { return -1; }
+    let base = tbl + TBL_FUNC_PARAM_ARRLEN_OFFSET + (fn_idx * TBL_FUNC_ARRLEN_ENTRY_SIZE) + (p_idx * 8);
+    set_qword(base, 0, arr_len);
+    return 0;
+}
+
+fn func_tbl_set_ret_metadata(tbl: i64, fn_idx: i64, pointee_type: i64, provenance: i64): i64 {
+    if fn_idx < 0 { return -1; }
+    if fn_idx >= TBL_FUNC_MAX_CAPACITY { return -1; }
+    let base = tbl + TBL_FUNC_BASE_OFFSET + (fn_idx * TBL_FUNC_ENTRY_SIZE);
+    set_qword(base, 22, pointee_type);
+    set_qword(base, 23, provenance);
+    return 0;
+}
+
+fn func_tbl_get(tbl: i64, hash: i64, field: i64): i64 {
+    let idx = func_tbl_find_index(tbl, hash);
+    if idx >= 0 {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (idx * TBL_FUNC_ENTRY_SIZE);
+        return get_qword(base, field);
+    }
+    if field == 1 { return -1; }
+    if field == 2 { return -1; }
+    if field == 22 { return TYPE_NONE; }
+    if field == 23 { return PROV_UNKNOWN; }
+    return TYPE_I64;
+}
+
+fn patch_tbl_reset(tbl: i64): i64 {
+    set_qword(tbl, TBL_PATCH_COUNT_QWORD_IDX, 0);
+    let count = get_qword(tbl, TBL_FUNC_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_FUNC_BASE_OFFSET + (i * TBL_FUNC_ENTRY_SIZE);
+        set_qword(base, 1, -1);
+        i = i + 1;
+    }
+    let s_cnt = get_qword(tbl, 35000);
+    let si = 0;
+    while si < s_cnt {
+        set_qword(tbl + 280008 + (si * 64), 7, 0); # is_compiled = 0
+        si = si + 1;
+    }
+    return 0;
+}
+
+fn patch_tbl_add(tbl: i64, patch_pos: i64, func_hash: i64): i64 {
+    let count = get_qword(tbl, TBL_PATCH_COUNT_QWORD_IDX);
+    if count >= TBL_PATCH_MAX_CAPACITY {
+        return -32;
+    }
+    let base = tbl + TBL_PATCH_BASE_OFFSET + (count * TBL_PATCH_ENTRY_SIZE);
+    set_qword(base, 0, patch_pos);
+    set_qword(base, 1, func_hash);
+    set_qword(tbl, TBL_PATCH_COUNT_QWORD_IDX, count + 1);
+    return 0;
+}
+
+fn var_tbl_add(tbl: i64, hash: i64, slot: i64, var_type: i64, pointee_type: i64, provenance: i64, array_len: i64): i64 {
+    let count = get_qword(tbl, TBL_VAR_COUNT_QWORD_IDX);
+    if count >= TBL_VAR_MAX_CAPACITY {
+        return -33;
+    }
+    let base = tbl + TBL_VAR_BASE_OFFSET + (count * TBL_VAR_ENTRY_SIZE);
+    set_qword(base, 0, hash);
+    set_qword(base, 1, slot);
+    set_qword(base, 2, var_type);
+    set_qword(base, 3, pointee_type);
+    set_qword(base, 4, provenance);
+    set_qword(base, 5, array_len);
+    set_qword(tbl, TBL_VAR_COUNT_QWORD_IDX, count + 1);
+    return 0;
+}
+
+fn var_tbl_get(tbl: i64, hash: i64, field: i64): i64 {
+    let count = get_qword(tbl, TBL_VAR_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_VAR_BASE_OFFSET + (i * TBL_VAR_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            return get_qword(base, field);
+        }
+        i = i + 1;
+    }
+    if field == 2 { return TYPE_NONE; }
+    if field == 3 { return TYPE_NONE; }
+    return 0;
+}
+
+fn var_tbl_set_metadata(tbl: i64, hash: i64, pointee_type: i64, provenance: i64, array_len: i64): i64 {
+    let count = get_qword(tbl, TBL_VAR_COUNT_QWORD_IDX);
+    let i = 0;
+    while i < count {
+        let base = tbl + TBL_VAR_BASE_OFFSET + (i * TBL_VAR_ENTRY_SIZE);
+        if get_qword(base, 0) == hash {
+            set_qword(base, 3, pointee_type);
+            set_qword(base, 4, provenance);
+            if array_len > 0 {
+                set_qword(base, 5, array_len);
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn epilogue_patches_add(tbl: i64, patch_pos: i64): i64 {
+    let count = get_qword(tbl, TBL_EPILOGUE_COUNT_QWORD_IDX);
+    if count >= TBL_EPILOGUE_MAX_CAPACITY {
+        return -34;
+    }
+    let base = tbl + TBL_EPILOGUE_BASE_OFFSET + (count * TBL_EPILOGUE_ENTRY_SIZE);
+    set_qword(base, 0, patch_pos);
+    set_qword(tbl, TBL_EPILOGUE_COUNT_QWORD_IDX, count + 1);
+    return 0;
+}
+
+
+fn parser_push_rax(s: i64): i64 {
+    let code_buf = get_qword(s, 3);
+    let l = get_qword(s, 4);
+    l = emit_byte(code_buf, l, 80); # push rax (0x50)
+    set_qword(s, 4, l);
+    let depth = get_qword(s, 12);
+    set_qword(s, 12, depth + 1);
+    return l;
+}
+
+fn parser_pop_reg(s: i64, reg_byte: i64): i64 {
+    let code_buf = get_qword(s, 3);
+    let l = get_qword(s, 4);
+    l = emit_byte(code_buf, l, reg_byte); # 88 for pop rax, 89 for pop rcx
+    set_qword(s, 4, l);
+    let depth = get_qword(s, 12);
+    set_qword(s, 12, depth - 1);
+    return l;
+}
+
+# ------------------------------------------------------------------------------
+# Parser State Helpers
+# s[0] = src, s[1] = src_len, s[2] = pos, s[3] = code_buf, s[4] = code_len,
+# s[5] = tbl, s[6] = tok_buf, s[7] = status, s[12] = stack_depth, s[13] = cur_fn_ret_type
+# ------------------------------------------------------------------------------
+
+fn advance_token(s: i64): i64 {
+    let src = get_qword(s, 0);
+    let src_len = get_qword(s, 1);
+    let pos = get_qword(s, 2);
+    let tok_buf = get_qword(s, 6);
+    let next_pos = scan_token(src, pos, src_len, tok_buf);
+    set_qword(s, 2, next_pos);
+    return get_qword(tok_buf, 0);
+}
+
+fn cur_tok_kind(s: i64): i64 {
+    let tok_buf = get_qword(s, 6);
+    return get_qword(tok_buf, 0);
+}
+
+fn cur_tok_val(s: i64): i64 {
+    let tok_buf = get_qword(s, 6);
+    return get_qword(tok_buf, 1);
+}
+
+fn cur_tok_offset(s: i64): i64 {
+    let tok_buf = get_qword(s, 6);
+    return get_qword(tok_buf, 2);
+}
+
+fn cur_tok_len(s: i64): i64 {
+    let tok_buf = get_qword(s, 6);
+    return get_qword(tok_buf, 3);
+}
+
+fn expect(s: i64, expected: i64): i64 {
+    if get_qword(s, 7) < 0 {
+        return get_qword(s, 7);
+    }
+    if cur_tok_kind(s) == expected {
+        advance_token(s);
+        return 0;
+    }
+    if expected == TOKEN_SEMICOLON {
+        return 0;
+    }
+    if cur_tok_kind(s) == TOKEN_ERROR {
+        set_qword(s, 7, -3); # ERR_INVALID_TOKEN
+        set_qword(s, 8, expected);
+        set_qword(s, 9, TOKEN_ERROR);
+        set_qword(s, 10, cur_tok_offset(s));
+        return -3;
+    }
+    set_qword(s, 7, -1); # ERR_SYNTAX
+    set_qword(s, 8, expected);
+    set_qword(s, 9, cur_tok_kind(s));
+    set_qword(s, 10, cur_tok_offset(s));
+    return -1;
+}
+
+# ------------------------------------------------------------------------------
+# Generic Templates & Monomorphization Tables (offset 260000..295000 in tbl_buf)
+# ------------------------------------------------------------------------------
+
+fn mangle_generic_hash(base_hash: i64, param_count: i64, t0: i64, t1: i64, t2: i64, t3: i64): i64 {
+    let h = base_hash;
+    h = (h * 33) + param_count;
+    if param_count >= 1 { h = (h * 33) + t0; }
+    if param_count >= 2 { h = (h * 33) + t1; }
+    if param_count >= 3 { h = (h * 33) + t2; }
+    if param_count >= 4 { h = (h * 33) + t3; }
+    return h;
+}
+
+fn gen_tbl_op(tbl: i64, op: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64): i64 {
+    if op == 1 {
+        let count = get_qword(tbl, 32500);
+        let i = 0;
+        while i < count {
+            let base = tbl + 260008 + (i * 128);
+            if get_qword(base, 0) == a1 { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+    if op == 2 {
+        let count = get_qword(tbl, 32500);
+        if count >= 32 { return -1; }
+        let base = tbl + 260008 + (count * 128);
+        set_qword(base, 0, a1);
+        set_qword(base, 1, a2);
+        set_qword(base, 2, a3);
+        set_qword(base, 3, a4);
+        set_qword(base, 4, a5);
+        set_qword(base, 5, a6);
+        set_qword(base, 6, a7);
+        set_qword(tbl, 32500, count + 1);
+        return count;
+    }
+    if op == 3 {
+        if a1 < 0 { return 0; }
+        return get_qword(tbl + 260008 + (a1 * 128), a2);
+    }
+    if op == 4 {
+        let count = get_qword(tbl, 33750);
+        let i = 0;
+        while i < count {
+            let base = tbl + 270008 + (i * 128);
+            if get_qword(base, 0) == a1 { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+    if op == 5 {
+        let count = get_qword(tbl, TBL_GEN_FUNC_COUNT_QWORD_IDX);
+        if count >= TBL_GEN_FUNC_MAX_CAPACITY { return -1; }
+        let base = tbl + TBL_GEN_FUNC_BASE_OFFSET + (count * TBL_GEN_FUNC_ENTRY_SIZE);
+        set_qword(base, 0, a1);
+        set_qword(base, 1, a2);
+        set_qword(base, 2, a3);
+        set_qword(base, 3, a4);
+        set_qword(base, 4, a5);
+        set_qword(base, 5, a6);
+        set_qword(base, 6, a7);
+        set_qword(tbl, TBL_GEN_FUNC_COUNT_QWORD_IDX, count + 1);
+        return count;
+    }
+    if op == 6 {
+        if a1 < 0 { return 0; }
+        return get_qword(tbl + TBL_GEN_FUNC_BASE_OFFSET + (a1 * TBL_GEN_FUNC_ENTRY_SIZE), a2);
+    }
+    if op == 7 {
+        let count = get_qword(tbl, TBL_GEN_INST_COUNT_QWORD_IDX);
+        let i = 0;
+        while i < count {
+            let base = tbl + TBL_GEN_INST_BASE_OFFSET + (i * TBL_GEN_INST_ENTRY_SIZE);
+            if get_qword(base, 1) == a1 { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+    if op == 8 {
+        let count = get_qword(tbl, TBL_GEN_INST_COUNT_QWORD_IDX);
+        if count >= TBL_GEN_INST_MAX_CAPACITY { return -1; }
+        let base = tbl + TBL_GEN_INST_BASE_OFFSET + (count * TBL_GEN_INST_ENTRY_SIZE);
+        set_qword(base, 0, a1);
+        set_qword(base, 1, a2);
+        set_qword(base, 2, a3);
+        set_qword(base, 3, a4);
+        set_qword(base, 4, a5);
+        set_qword(base, 5, a6);
+        set_qword(base, 6, a7);
+        set_qword(base, 7, 0); # is_compiled = 0
+        set_qword(tbl, TBL_GEN_INST_COUNT_QWORD_IDX, count + 1);
+        return count;
+    }
+    if op == 9 {
+        if a1 < 0 { return 0; }
+        return get_qword(tbl + TBL_GEN_INST_BASE_OFFSET + (a1 * TBL_GEN_INST_ENTRY_SIZE), a2);
+    }
+    if op == 10 {
+        if a1 < 0 { return -1; }
+        set_qword(tbl + TBL_GEN_INST_BASE_OFFSET + (a1 * TBL_GEN_INST_ENTRY_SIZE), 7, a2);
+        return 0;
+    }
+    if op == 11 {
+        let count = get_qword(tbl, TBL_GEN_BIND_COUNT_QWORD_IDX);
+        if count >= TBL_GEN_BIND_MAX_CAPACITY { return -1; }
+        let base = tbl + TBL_GEN_BIND_BASE_OFFSET + (count * TBL_GEN_BIND_ENTRY_SIZE);
+        set_qword(base, 0, a1);
+        set_qword(base, 1, a2);
+        set_qword(tbl, TBL_GEN_BIND_COUNT_QWORD_IDX, count + 1);
+        return count;
+    }
+    if op == 12 {
+        let count = get_qword(tbl, TBL_GEN_BIND_COUNT_QWORD_IDX);
+        if count <= 0 { return -1; }
+        set_qword(tbl, TBL_GEN_BIND_COUNT_QWORD_IDX, count - 1);
+        return 0;
+    }
+    if op == 13 {
+        let count = get_qword(tbl, TBL_GEN_BIND_COUNT_QWORD_IDX);
+        let i = count - 1;
+        while i >= 0 {
+            let base = tbl + TBL_GEN_BIND_BASE_OFFSET + (i * TBL_GEN_BIND_ENTRY_SIZE);
+            if get_qword(base, 0) == a1 {
+                return get_qword(base, 1);
+            }
+            i = i - 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+fn instantiate_generic_struct(s: i64, gs_idx: i64, mangled_h: i64, arg_cnt: i64, t0: i64, t1: i64, t2: i64, t3: i64): i64 {
+    let tbl = get_qword(s, 5);
+    let count = get_qword(tbl, TBL_STRUCT_COUNT_QWORD_IDX);
+    if count >= TBL_STRUCT_MAX_CAPACITY {
+        set_qword(s, 7, -31);
+        return -1;
+    }
+    let struct_id = count;
+    let base = tbl + TBL_STRUCT_BASE_OFFSET + (struct_id * TBL_STRUCT_ENTRY_SIZE);
+    set_qword(base, 0, mangled_h);
+    set_qword(base, 1, 0); # total_size
+    set_qword(base, 2, 8); # alignment
+    set_qword(base, 3, 0); # field_count
+    set_qword(tbl, TBL_STRUCT_COUNT_QWORD_IDX, count + 1);
+
+    # Push type substitutions
+    let p_cnt = gen_tbl_op(tbl, 3, gs_idx, 1, 0, 0, 0, 0, 0);
+    if p_cnt >= 1 { gen_tbl_op(tbl, 11, gen_tbl_op(tbl, 3, gs_idx, 2, 0, 0, 0, 0, 0), t0, 0, 0, 0, 0, 0); }
+    if p_cnt >= 2 { gen_tbl_op(tbl, 11, gen_tbl_op(tbl, 3, gs_idx, 3, 0, 0, 0, 0, 0), t1, 0, 0, 0, 0, 0); }
+    if p_cnt >= 3 { gen_tbl_op(tbl, 11, gen_tbl_op(tbl, 3, gs_idx, 4, 0, 0, 0, 0, 0), t2, 0, 0, 0, 0, 0); }
+    if p_cnt >= 4 { gen_tbl_op(tbl, 11, gen_tbl_op(tbl, 3, gs_idx, 5, 0, 0, 0, 0, 0), t3, 0, 0, 0, 0, 0); }
+
+    # Save parser state
+    let saved_pos = get_qword(s, 2);
+    let tok_buf = get_qword(s, 6);
+    let saved_k = get_qword(tok_buf, 0);
+    let saved_v = get_qword(tok_buf, 1);
+    let saved_o = get_qword(tok_buf, 2);
+    let saved_l = get_qword(tok_buf, 3);
+
+    # Jump to struct body position
+    let body_pos = gen_tbl_op(tbl, 3, gs_idx, 6, 0, 0, 0, 0, 0);
+    set_qword(s, 2, body_pos);
+    advance_token(s); # scan '{'
+
+    # Parse struct fields directly into struct_id
+    let cur_offset = 0;
+    let max_align = 1;
+    let field_count = 0;
+    let src = get_qword(s, 0);
+    expect(s, TOKEN_LBRACE);
+    if get_qword(s, 7) < 0 { return get_qword(s, 7); }
+
+    while cur_tok_kind(s) != TOKEN_RBRACE {
+        if cur_tok_kind(s) == TOKEN_EOF {
+            set_qword(s, 7, -1);
+            return -1;
+        }
+        let f_offset = cur_tok_offset(s);
+        let f_len = cur_tok_len(s);
+        let f_hash = hash_token(src, f_offset, f_len);
+        expect(s, TOKEN_IDENT);
+        if get_qword(s, 7) < 0 { return get_qword(s, 7); }
+
+        expect(s, TOKEN_COLON);
+        if get_qword(s, 7) < 0 { return get_qword(s, 7); }
+
+        let f_type = parse_type(s);
+        if get_qword(s, 7) < 0 { return get_qword(s, 7); }
+        let f_pointee = get_qword(s, 14);
+        let f_arr_len = get_qword(s, 19);
+
+        let f_sz = 8;
+        let f_align = 8;
+
+        if f_type == TYPE_I64 { f_sz = 8; f_align = 8; }
+        if f_type == TYPE_PTR { f_sz = 8; f_align = 8; }
+        if f_type == TYPE_STR { f_sz = 8; f_align = 8; }
+        if f_type == TYPE_F64 { f_sz = 8; f_align = 8; }
+        if f_type == TYPE_I32 { f_sz = 4; f_align = 4; }
+        if f_type == TYPE_F32 { f_sz = 4; f_align = 4; }
+        if f_type == TYPE_U8  { f_sz = 1; f_align = 1; }
+        if f_type == TYPE_BOOL { f_sz = 1; f_align = 1; }
+        if f_type == TYPE_CHAR { f_sz = 4; f_align = 4; }
+        if (f_type == TYPE_OPTION) | (f_type == TYPE_RESULT) | (f_type == TYPE_TUPLE) {
+            f_sz = 16; f_align = 8;
+        }
+
+        if f_type >= TYPE_STRUCT {
+            let nested_id = f_type - TYPE_STRUCT;
+            f_sz = struct_tbl_get_meta(tbl, nested_id, 1);
+            f_align = struct_tbl_get_meta(tbl, nested_id, 2);
+        }
+
+        if f_type == TYPE_ARRAY {
+            let elem_sz = 8;
+            if f_pointee == TYPE_I32 { elem_sz = 4; }
+            if f_pointee == TYPE_F32 { elem_sz = 4; }
+            if f_pointee == TYPE_U8  { elem_sz = 1; }
+            if f_pointee == TYPE_BOOL { elem_sz = 1; }
+            if f_pointee == TYPE_CHAR { elem_sz = 4; }
+            if f_pointee >= TYPE_STRUCT {
+                elem_sz = struct_tbl_get_meta(tbl, f_pointee - TYPE_STRUCT, 1);
+            }
+            f_sz = elem_sz * f_arr_len;
+            f_align = elem_sz;
+            if f_align > 8 { f_align = 8; }
+        }
+
+        if (cur_offset % f_align) != 0 {
+            cur_offset = cur_offset + (f_align - (cur_offset % f_align));
+        }
+        if f_align > max_align { max_align = f_align; }
+
+        struct_tbl_set_field(tbl, struct_id, field_count, f_hash, f_type, f_pointee, cur_offset, f_sz, f_arr_len);
+        cur_offset = cur_offset + f_sz;
+        field_count = field_count + 1;
+
+        if cur_tok_kind(s) == TOKEN_COMMA {
+            advance_token(s);
+        } else {
+            if cur_tok_kind(s) == TOKEN_SEMICOLON {
+                advance_token(s);
+            }
+        }
+    }
+
+    expect(s, TOKEN_RBRACE);
+    if get_qword(s, 7) < 0 { return get_qword(s, 7); }
+
+    if (cur_offset % max_align) != 0 {
+        cur_offset = cur_offset + (max_align - (cur_offset % max_align));
+    }
+
+    set_qword(base, 1, cur_offset); # total_size
+    set_qword(base, 2, max_align);  # alignment
+    set_qword(base, 3, field_count);
+
+    # Restore parser state
+    set_qword(s, 2, saved_pos);
+    set_qword(tok_buf, 0, saved_k);
+    set_qword(tok_buf, 1, saved_v);
+    set_qword(tok_buf, 2, saved_o);
+    set_qword(tok_buf, 3, saved_l);
+
+    # Pop substitutions
+    let pi = 0;
+    while pi < p_cnt {
+        gen_tbl_op(tbl, 12, 0, 0, 0, 0, 0, 0, 0);
+        pi = pi + 1;
+    }
+
+    return struct_id;
+}
+
+fn parse_type(s: i64): i64 {
+    let k = cur_tok_kind(s);
+    if k == TOKEN_LPAREN {
+        advance_token(s); # skip '('
+        if cur_tok_kind(s) == TOKEN_RPAREN {
+            advance_token(s); # skip ')' -> unit type ()
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_VOID;
+        }
+        let t0 = parse_type(s);
+        if cur_tok_kind(s) == TOKEN_COMMA {
+            advance_token(s); # skip ','
+            let t1 = TYPE_NONE;
+            let arity = 1;
+            if cur_tok_kind(s) != TOKEN_RPAREN {
+                t1 = parse_type(s);
+                arity = 2;
+                while cur_tok_kind(s) == TOKEN_COMMA {
+                    advance_token(s);
+                    if cur_tok_kind(s) != TOKEN_RPAREN {
+                        let next_t = parse_type(s);
+                        arity = arity + 1;
+                    }
+                }
+            }
+            expect(s, TOKEN_RPAREN);
+            if get_qword(s, 7) < 0 { return TYPE_NONE; }
+            set_qword(s, 14, t0);
+            set_qword(s, 18, t1);
+            set_qword(s, 19, arity);
+            return TYPE_TUPLE;
+        }
+        expect(s, TOKEN_RPAREN);
+        return t0;
+    }
+    if k == TOKEN_STAR {
+        advance_token(s);
+        let inner_t = parse_type(s);
+        set_qword(s, 14, inner_t);
+        return TYPE_PTR;
+    }
+    if k == TOKEN_LBRACKET {
+        advance_token(s); # skip '['
+        let elem_t = parse_type(s);
+        let inner_elem_t = get_qword(s, 14);
+        let arr_len = 0;
+        if cur_tok_kind(s) == TOKEN_SEMICOLON {
+            advance_token(s); # skip ';'
+            if cur_tok_kind(s) != TOKEN_INT_LIT {
+                set_qword(s, 7, -50); # ERR_INVALID_ARRAY_SIZE
+                return TYPE_NONE;
+            }
+            arr_len = cur_tok_val(s);
+            if arr_len <= 0 {
+                set_qword(s, 7, -50); # ERR_INVALID_ARRAY_SIZE
+                return TYPE_NONE;
+            }
+            advance_token(s); # skip INT_LIT
+        }
+        expect(s, TOKEN_RBRACKET);
+        if get_qword(s, 7) < 0 { return TYPE_NONE; }
+        set_qword(s, 14, elem_t);
+        set_qword(s, 18, inner_elem_t);
+        set_qword(s, 19, arr_len);
+        return TYPE_ARRAY;
+    }
+    if k == TOKEN_QUESTION {
+        advance_token(s); # skip '?'
+        let inner_t = parse_type(s);
+        set_qword(s, 14, inner_t);
+        set_qword(s, 18, TYPE_NONE);
+        set_qword(s, 19, 0);
+        return TYPE_OPTION;
+    }
+    if k == TOKEN_BANG {
+        advance_token(s); # skip '!'
+        let ok_t = parse_type(s);
+        set_qword(s, 14, ok_t);
+        set_qword(s, 18, TYPE_I64);
+        set_qword(s, 19, 0);
+        return TYPE_RESULT;
+    }
+    set_qword(s, 14, TYPE_NONE);
+    set_qword(s, 18, TYPE_NONE);
+    set_qword(s, 19, 0);
+    if k == TOKEN_TYPE_I64  { advance_token(s); return TYPE_I64; }
+    if k == TOKEN_TYPE_I32  { advance_token(s); return TYPE_I32; }
+    if k == TOKEN_TYPE_F64  { advance_token(s); return TYPE_F64; }
+    if k == TOKEN_TYPE_F32  { advance_token(s); return TYPE_F32; }
+    if k == TOKEN_TYPE_U8   { advance_token(s); return TYPE_U8; }
+    if k == TOKEN_TYPE_CHAR { advance_token(s); return TYPE_CHAR; }
+    if k == TOKEN_TYPE_BOOL { advance_token(s); return TYPE_BOOL; }
+    if k == TOKEN_TYPE_PTR  { advance_token(s); return TYPE_PTR; }
+    if k == TOKEN_TYPE_STR  { advance_token(s); return TYPE_STR; }
+    if k == TOKEN_TYPE_VOID { advance_token(s); return TYPE_VOID; }
+
+    if k == TOKEN_IDENT {
+        let src = get_qword(s, 0);
+        let s_hash = hash_token(src, cur_tok_offset(s), cur_tok_len(s));
+        let tbl = get_qword(s, 5);
+
+        if (s_hash == 229428565026291) | (s_hash == 193460240) { # Integer or Int
+            advance_token(s);
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_I64;
+        }
+        if s_hash == 6952779160540 { # String
+            advance_token(s);
+            set_qword(s, 14, TYPE_U8);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_STR;
+        }
+        if s_hash == 229419558205541 { # Boolean
+            advance_token(s);
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_BOOL;
+        }
+        if s_hash == 210674569595 { # Float
+            advance_token(s);
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_F64;
+        }
+        if s_hash == 6384655927 { # Void
+            advance_token(s);
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_VOID;
+        }
+
+        let alias_t = type_alias_find(tbl, s_hash);
+        if alias_t > 0 {
+            advance_token(s);
+            set_qword(s, 14, TYPE_NONE);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return alias_t;
+        }
+
+        let subst_t = gen_tbl_op(tbl, 13, s_hash, 0, 0, 0, 0, 0, 0);
+        if subst_t > 0 {
+            advance_token(s);
+            set_qword(s, 14, subst_t);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return subst_t;
+        }
+
+        let gs_idx = gen_tbl_op(tbl, 1, s_hash, 0, 0, 0, 0, 0, 0);
+        if gs_idx >= 0 {
+            advance_token(s); # skip struct template name
+            if cur_tok_kind(s) == TOKEN_LBRACKET {
+                advance_token(s); # skip '['
+                let gt0 = parse_type(s);
+                let gt1 = TYPE_NONE;
+                let gt2 = TYPE_NONE;
+                let gt3 = TYPE_NONE;
+                let g_arg_cnt = 1;
+                while cur_tok_kind(s) == TOKEN_COMMA {
+                    advance_token(s);
+                    if g_arg_cnt == 1 { gt1 = parse_type(s); }
+                    if g_arg_cnt == 2 { gt2 = parse_type(s); }
+                    if g_arg_cnt == 3 { gt3 = parse_type(s); }
+                    g_arg_cnt = g_arg_cnt + 1;
+                }
+                expect(s, TOKEN_RBRACKET);
+                if get_qword(s, 7) < 0 { return TYPE_NONE; }
+                let mangled_h = mangle_generic_hash(s_hash, g_arg_cnt, gt0, gt1, gt2, gt3);
+                let g_sid = struct_tbl_find(tbl, mangled_h);
+                if g_sid < 0 {
+                    g_sid = instantiate_generic_struct(s, gs_idx, mangled_h, g_arg_cnt, gt0, gt1, gt2, gt3);
+                }
+                set_qword(s, 14, TYPE_STRUCT + g_sid);
+                set_qword(s, 18, TYPE_NONE);
+                set_qword(s, 19, 0);
+                return TYPE_STRUCT + g_sid;
+            }
+        }
+
+        let struct_id = struct_tbl_find(tbl, s_hash);
+        if struct_id >= 0 {
+            if cur_tok_kind(s) != TOKEN_LBRACKET {
+                advance_token(s);
+                set_qword(s, 14, TYPE_STRUCT + struct_id);
+                set_qword(s, 18, TYPE_NONE);
+                set_qword(s, 19, 0);
+                return TYPE_STRUCT + struct_id;
+            }
+        }
+        if s_hash == 6952617947198 { # 'Option'
+            advance_token(s); # skip 'Option'
+            if cur_tok_kind(s) == TOKEN_LBRACKET {
+                advance_token(s); # skip '['
+                let inner_t = parse_type(s);
+                expect(s, TOKEN_RBRACKET);
+                if get_qword(s, 7) < 0 { return TYPE_NONE; }
+                set_qword(s, 14, inner_t);
+                set_qword(s, 18, TYPE_NONE);
+                set_qword(s, 19, 0);
+                return TYPE_OPTION;
+            }
+            set_qword(s, 14, TYPE_I64);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_OPTION;
+        }
+        if s_hash == 6952722285284 { # 'Result'
+            advance_token(s); # skip 'Result'
+            if cur_tok_kind(s) == TOKEN_LBRACKET {
+                advance_token(s); # skip '['
+                let ok_t = parse_type(s);
+                expect(s, TOKEN_COMMA);
+                let err_t = parse_type(s);
+                expect(s, TOKEN_RBRACKET);
+                if get_qword(s, 7) < 0 { return TYPE_NONE; }
+                set_qword(s, 14, ok_t);
+                set_qword(s, 18, err_t);
+                set_qword(s, 19, 0);
+                return TYPE_RESULT;
+            }
+            set_qword(s, 14, TYPE_I64);
+            set_qword(s, 18, TYPE_I64);
+            set_qword(s, 19, 0);
+            return TYPE_RESULT;
+        }
+        if s_hash == 210691497359 { # 'Tuple'
+            advance_token(s); # skip 'Tuple'
+            if cur_tok_kind(s) == TOKEN_LBRACKET {
+                advance_token(s); # skip '['
+                t0 = parse_type(s);
+                expect(s, TOKEN_COMMA);
+                t1 = parse_type(s);
+                arity = 2;
+                while cur_tok_kind(s) == TOKEN_COMMA {
+                    advance_token(s);
+                    if cur_tok_kind(s) != TOKEN_RBRACKET {
+                        next_t = parse_type(s);
+                        arity = arity + 1;
+                    }
+                }
+                expect(s, TOKEN_RBRACKET);
+                if get_qword(s, 7) < 0 { return TYPE_NONE; }
+                set_qword(s, 14, t0);
+                set_qword(s, 18, t1);
+                set_qword(s, 19, arity);
+                return TYPE_TUPLE;
+            }
+            set_qword(s, 14, TYPE_I64);
+            set_qword(s, 18, TYPE_I64);
+            set_qword(s, 19, 2);
+            return TYPE_TUPLE;
+        }
+        let enum_id = enum_tbl_find(tbl, s_hash);
+        if enum_id >= 0 {
+            advance_token(s);
+            set_qword(s, 14, TYPE_I64);
+            set_qword(s, 18, TYPE_NONE);
+            set_qword(s, 19, 0);
+            return TYPE_I64;
+        }
+    }
+
+    set_qword(s, 7, -37); # ERR_UNKNOWN_TYPE
+    return TYPE_NONE;
+}
+
+# ------------------------------------------------------------------------------
+# Builtin Registration
+# ------------------------------------------------------------------------------
+
+fn register_builtins(tbl: i64): i64 {
+    func_tbl_add(tbl, 4858138384542055882, -2, 0, TYPE_I64); # sys_mmap_page
+
+    let idx = func_tbl_add(tbl, 7572409568671928, -2, 2, TYPE_I64); # get_byte
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 7572920989987652, -2, 3, TYPE_I64); # set_byte
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 249889515783885649, -2, 2, TYPE_I64); # get_qword
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 249906392687304541, -2, 3, TYPE_I64); # set_qword
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 7572946780668533, -2, 3, TYPE_I64); # sys_open
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 7572946780764223, -2, 3, TYPE_I64); # sys_read
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 249907243771625486, -2, 3, TYPE_I64); # sys_write
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 249907243747697945, -2, 1, TYPE_I64); # sys_close
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+
+    idx = func_tbl_add(tbl, -2647744904066970959, -2, 3, TYPE_I64); # sys_mprotect
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 4858123823083711801, -2, 1, TYPE_I64); # sys_call_code
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 7529887214154863653, -2, 3, TYPE_I64); # sys_call_code_args
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_PTR);
+
+    idx = func_tbl_add(tbl, 7572946780318013, -2, 1, TYPE_VOID); # sys_exit
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 7572946780593262, -2, 6, TYPE_I64); # sys_mmap
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 3, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 4, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 5, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 193505547, -2, 2, TYPE_I64); # sar
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, -3577716174734351287, -2, 1, TYPE_PTR); # alloc_buffer
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+
+    idx = func_tbl_add(tbl, -4572427511160034080, -2, 2, TYPE_I64); # free_buffer
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_PTR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 4604361535797710365, -2, 1, TYPE_I64); # string_length
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+
+    idx = func_tbl_add(tbl, 4369978079523077955, -2, 2, TYPE_U8); # string_byte_at
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, -2655435116151803629, -2, 2, TYPE_BOOL); # string_equal
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_STR);
+
+    idx = func_tbl_add(tbl, 4369978080415288578, -2, 2, TYPE_I64); # string_compare
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_STR);
+
+    idx = func_tbl_add(tbl, 4604361535457346067, -2, 2, TYPE_STR); # string_concat
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_STR);
+
+    idx = func_tbl_add(tbl, -4552405688055474698, -2, 3, TYPE_I64); # string_copy
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_PTR);
+    func_tbl_set_param_metadata(tbl, idx, 0, TYPE_U8, PROV_UNKNOWN);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, -3364675804167515880, -2, 1, TYPE_STR); # string_from_raw
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_PTR);
+    func_tbl_set_param_metadata(tbl, idx, 0, TYPE_U8, PROV_UNKNOWN);
+
+    idx = func_tbl_add(tbl, 229479076111340, -2, 1, TYPE_I64); # println
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_NONE);
+
+    idx = func_tbl_add(tbl, 210724587794, -2, 1, TYPE_I64); # print
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_NONE);
+
+    idx = func_tbl_add(tbl, 229461282205997, -2, 2, TYPE_U8); # byte_at
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 6071565643712696392, -2, 1, TYPE_STR); # int_to_string
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 249907052122048006, -2, 3, TYPE_STR); # substring
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+    func_tbl_set_param_type(tbl, idx, 1, TYPE_I64);
+    func_tbl_set_param_type(tbl, idx, 2, TYPE_I64);
+
+    idx = func_tbl_add(tbl, 4604361536122115656, -2, 1, TYPE_I64); # string_to_int
+    func_tbl_set_param_type(tbl, idx, 0, TYPE_STR);
+
+    return 0;
+}

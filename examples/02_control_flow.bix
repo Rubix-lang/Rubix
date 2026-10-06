@@ -1,0 +1,36 @@
+# Control flow: conditionals and loops in Rubix.
+# Run with: rubix run examples/02_control_flow.bix
+
+fn check_sign(n: Integer): Integer {
+    # If-else can be used as an expression that yields a value
+    if n > 0 {
+        1
+    } else if n < 0 {
+        0 - 1
+    } else {
+        0
+    }
+}
+
+fn main(): Integer {
+    print "Sign of 42:"
+    print check_sign(42)
+
+    print "Sign of -15:"
+    print check_sign(0 - 15)
+
+    # In Rubix, `loop` repeats while its condition remains true.
+    # We use `mut` variables for counters and running totals.
+    mut count = 1
+    mut total = 0
+
+    loop count <= 5 {
+        total = total + count
+        count = count + 1
+    }
+
+    print "Sum of numbers from 1 to 5:"
+    print total
+
+    0
+}

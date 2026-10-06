@@ -1,0 +1,64 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native AST (rubix/rcs/ast.bix)
+# Pure native Rubix structures for rules, selectors, properties, and motion.
+# Zero Python. Zero heap bloat.
+# ==============================================================================
+
+# --- Token Kinds ---
+enum RcsTokenKind {
+    Ident,
+    Selector,
+    Colon,
+    Semicolon,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    LParen,
+    RParen,
+    Comma,
+    String,
+    Number,
+    Dimension,
+    Color,
+    Operator,
+    Comment,
+    AtRule,
+    Eof
+}
+
+# --- Token Representation ---
+struct RcsToken {
+    kind: i64,
+    start_offset: i64,
+    length: i64,
+    line: i64,
+    col: i64
+}
+
+# --- Property Declaration (e.g. radius: 12px or bg: surface) ---
+struct RcsDeclaration {
+    prop: str,
+    val: str
+}
+
+# --- Motion Statement (e.g. pop on hover smooth or slide up 20 on load) ---
+struct RcsMotion {
+    verb: str,
+    direction: str,
+    amount: i64,
+    target_color: str,
+    trigger: str,
+    feel: str,
+    repeat_count: i64,
+    delay_ms: i64,
+    state_cond: str
+}
+
+# --- Rule (Selector + Declarations + Motion Rules) ---
+struct RcsRule {
+    selector: str,
+    decl_count: i64,
+    motion_count: i64,
+    state_condition: str
+}

@@ -1,0 +1,79 @@
+{
+  "Function Declaration": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}): ${3:ReturnType} {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Declare a Rubix function"
+  },
+  "Record Struct Type": {
+    "prefix": "type",
+    "body": [
+      "type ${1:Name} {",
+      "\t${2:field}: ${3:Type}",
+      "}"
+    ],
+    "description": "Declare a Rubix record struct type"
+  },
+  "Sum Type Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "\t${2:Variant1}(${3:Type}),",
+      "\t${4:Variant2}",
+      "}"
+    ],
+    "description": "Declare a Rubix sum type enum"
+  },
+  "Pattern Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:expression} {",
+      "\t${2:Pattern} => ${3:result},",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Exhaustive pattern match expression"
+  },
+  "Predicate Loop": {
+    "prefix": "loop",
+    "body": [
+      "loop ${1:condition} {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Rubix loop construct"
+  },
+  "For Range Loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:0}..${3:10} {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "For in range iterator loop"
+  },
+  "If Else": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t${2}",
+      "} else {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "If-else conditional expression"
+  },
+  "Main Function": {
+    "prefix": "main",
+    "body": [
+      "fn main(): Integer {",
+      "\t${0}",
+      "\t0",
+      "}"
+    ],
+    "description": "Rubix entry point main function"
+  }
+}

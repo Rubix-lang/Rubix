@@ -1,0 +1,140 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Rubix",
+  "scopeName": "source.rubix",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constructors" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.rubix",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.rubix",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rubix",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.rubix",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.hex.rubix",
+          "match": "\\b0x[0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.rubix",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.rubix",
+          "match": "\\b(if|else|loop|for|in|match|return|fail|do|end)\\b"
+        },
+        {
+          "name": "keyword.declaration.rubix",
+          "match": "\\b(fn|def|type|enum|use|module|extern)\\b"
+        },
+        {
+          "name": "keyword.other.rubix",
+          "match": "\\b(print)\\b"
+        },
+        {
+          "name": "storage.modifier.rubix",
+          "match": "\\b(let|mut)\\b"
+        },
+        {
+          "name": "constant.language.boolean.rubix",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.rubix",
+          "match": "\\b(Integer|Float|Boolean|String|Void|Any|Int|Bool|Option|Result|Thread|Mutex|AtomicInt|Channel)\\b"
+        }
+      ]
+    },
+    "constructors": {
+      "patterns": [
+        {
+          "name": "support.class.rubix",
+          "match": "\\b(Some|None|Ok|Err)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b(?:fn|def)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:\\(|\\[|do|\\{)",
+          "captures": {
+            "1": { "name": "entity.name.function.rubix" }
+          }
+        },
+        {
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "support.function.rubix" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.rubix",
+          "match": ":="
+        },
+        {
+          "name": "keyword.operator.try.rubix",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.arrow.rubix",
+          "match": "=>|->"
+        },
+        {
+          "name": "keyword.operator.logical.rubix",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "keyword.operator.comparison.rubix",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.rubix",
+          "match": "\\+|-|\\*|/|%"
+        }
+      ]
+    }
+  }
+}

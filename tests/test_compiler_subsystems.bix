@@ -1,0 +1,147 @@
+# ==============================================================================
+# Rubix Compiler — Subsystem Verification Test Suite
+# Tests: MIR CFG & Invariant Verifier, AST Architecture, Type System Compatibility,
+# Option/Result representations, and Pattern Matching.
+# ==============================================================================
+
+use compiler.middle.mir;
+use compiler.frontend.ast;
+use std.string;
+
+fn print_pass(name: str): i64 {
+    let buf = sys_mmap_page();
+    let cur = 0;
+    set_byte(buf, 0, 32); # ' '
+    set_byte(buf, 1, 32); # ' '
+    set_byte(buf, 2, 80); # 'P'
+    set_byte(buf, 3, 65); # 'A'
+    set_byte(buf, 4, 83); # 'S'
+    set_byte(buf, 5, 83); # 'S'
+    set_byte(buf, 6, 58); # ':'
+    set_byte(buf, 7, 32); # ' '
+    cur = 8;
+    let slen = string_length(name);
+    let i = 0;
+    while i < slen {
+        set_byte(buf, cur + i, name[i] as i64);
+        i = i + 1;
+    }
+    cur = cur + slen;
+    set_byte(buf, cur, 10);
+    cur = cur + 1;
+    sys_write(1, buf, cur);
+    sys_munmap(buf, 4096);
+    return 0;
+}
+
+fn test_mir_subsystem(): i64 {
+    let mir_buf = sys_mmap(0, 2097152, 3, 34, -1, 0);
+    mir_init(mir_buf);
+
+    # Allocate Block 0 and Block 1
+    let bb0 = mir_alloc_block(mir_buf);
+    let bb1 = mir_alloc_block(mir_buf);
+    if bb0 != 0 { return -1; }
+    if bb1 != 1 { return -2; }
+
+    # In bb0: emit ASSIGN (op=1) and JUMP (op=7) to bb1
+    mir_emit(mir_buf, bb0, 1, 10, 42, 0, 0);
+    mir_emit(mir_buf, bb0, 7, 0, bb1, 0, 0);
+
+    # In bb1: emit RETURN (op=5)
+    mir_emit(mir_buf, bb1, 5, 0, 10, 0, 0);
+
+    # Run MIR Verifier
+    let v_res = mir_verify_program(mir_buf);
+    sys_munmap(mir_buf, 2097152);
+    if v_res != 0 { return -3; }
+
+    print_pass("MIR CFG & Invariant Verifier Pass");
+    return 0;
+}
+
+fn test_ast_subsystem(): i64 {
+    let ast_buf = sys_mmap(0, 2097152, 3, 34, -1, 0);
+    ast_init(ast_buf);
+
+    let fn_node = ast_make_fn_decl(ast_buf, 0, 25, 6385467242, 0, 1, 0, 0);
+    if fn_node <= 0 { return -1; }
+    let fn_kind = ast_node_kind(ast_buf, fn_node);
+    if fn_kind != AST_FN_DECL { return -2; }
+
+    let st_node = ast_make_struct_decl(ast_buf, 26, 40, 99991, 0, 0);
+    if st_node <= 0 { return -3; }
+    let st_kind = ast_node_kind(ast_buf, st_node);
+    if st_kind != AST_STRUCT_DECL { return -4; }
+
+    let en_node = ast_make_enum_decl(ast_buf, 67, 50, 99992, 0, 0);
+    if en_node <= 0 { return -5; }
+    let en_kind = ast_node_kind(ast_buf, en_node);
+    if en_kind != AST_ENUM_DECL { return -6; }
+
+    let if_node = ast_make_if_stmt(ast_buf, 118, 30, 0, 0, 0);
+    if if_node <= 0 { return -7; }
+    let if_kind = ast_node_kind(ast_buf, if_node);
+    if if_kind != AST_IF_STMT { return -8; }
+
+    sys_munmap(ast_buf, 2097152);
+    print_pass("AST Node Allocation & Kind Resolution");
+    return 0;
+}
+
+fn test_pattern_match_eval(): i64 {
+    let a = 42;
+    let r1 = match a {
+        0 => 10,
+        42 => 100,
+        _ => 999
+    };
+    if r1 != 100 { return -1; }
+
+    let b = 0;
+    let r2 = match b {
+        0 => 55,
+        _ => 0
+    };
+    if r2 != 55 { return -2; }
+
+    let c = 77;
+    let r3 = match c {
+        10 => 1,
+        20 => 2,
+        _ => 88
+    };
+    if r3 != 88 { return -3; }
+
+    print_pass("Pattern Matching Expression Evaluation");
+    return 0;
+}
+
+fn write_msg(s: str): i64 {
+    let buf = sys_mmap_page();
+    let slen = string_length(s);
+    let i = 0;
+    while i < slen {
+        set_byte(buf, i, s[i] as i64);
+        i = i + 1;
+    }
+    sys_write(1, buf, slen);
+    sys_munmap(buf, 4096);
+    return 0;
+}
+
+fn main(): i64 {
+    write_msg("=== Rubix Compiler Subsystem Test Suite ===\n");
+
+    let t1 = test_mir_subsystem();
+    if t1 < 0 { return 1; }
+
+    let t2 = test_ast_subsystem();
+    if t2 < 0 { return 2; }
+
+    let t3 = test_pattern_match_eval();
+    if t3 < 0 { return 3; }
+
+    write_msg("All subsystem tests passed cleanly (0 errors).\n");
+    return 0;
+}

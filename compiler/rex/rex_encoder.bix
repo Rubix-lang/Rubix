@@ -1,0 +1,175 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Binary Module Encoder
+# File: compiler/rex/rex_encoder.bix
+#
+# Low-level deterministic binary serialization for .rex modules.
+# Provides primitives for writing typed values, instruction streams, and sections.
+# ==============================================================================
+
+
+fn rex_emit_u8(buf: i64, p: i64, b: i64): i64 {
+    set_byte(buf, p, b & 255);
+    return p + 1;
+}
+
+fn rex_emit_u16(buf: i64, p: i64, v: i64): i64 {
+    set_byte(buf, p + 0, v & 255);
+    set_byte(buf, p + 1, (v >> 8) & 255);
+    return p + 2;
+}
+
+fn rex_emit_u32(buf: i64, p: i64, v: i64): i64 {
+    set_byte(buf, p + 0, v & 255);
+    set_byte(buf, p + 1, (v >> 8) & 255);
+    set_byte(buf, p + 2, (v >> 16) & 255);
+    set_byte(buf, p + 3, (v >> 24) & 255);
+    return p + 4;
+}
+
+fn rex_emit_u64(buf: i64, p: i64, v: i64): i64 {
+    set_byte(buf, p + 0, v & 255);
+    set_byte(buf, p + 1, (v >> 8) & 255);
+    set_byte(buf, p + 2, (v >> 16) & 255);
+    set_byte(buf, p + 3, (v >> 24) & 255);
+    set_byte(buf, p + 4, (v >> 32) & 255);
+    set_byte(buf, p + 5, (v >> 40) & 255);
+    set_byte(buf, p + 6, (v >> 48) & 255);
+    set_byte(buf, p + 7, (v >> 56) & 255);
+    return p + 8;
+}
+
+fn rex_emit_i32(buf: i64, p: i64, v: i64): i64 {
+    return rex_emit_u32(buf, p, v);
+}
+
+fn rex_emit_i64(buf: i64, p: i64, v: i64): i64 {
+    return rex_emit_u64(buf, p, v);
+}
+
+# Emits the 16-byte REX module header
+fn rex_emit_header(buf: i64, flags: i64, total_size: i64, section_count: i64): i64 {
+    set_byte(buf, 0, REX_MAGIC_0); # 0x7F
+    set_byte(buf, 1, REX_MAGIC_1); # 'R'
+    set_byte(buf, 2, REX_MAGIC_2); # 'E'
+    set_byte(buf, 3, REX_MAGIC_3); # 'X'
+    rex_emit_u16(buf, 4, REX_VERSION_CURRENT);
+    rex_emit_u16(buf, 6, flags);
+    rex_emit_u32(buf, 8, total_size);
+    rex_emit_u32(buf, 12, section_count);
+    return 16;
+}
+
+# Emits a section header: [sec_id: u8] [sec_len: u32]
+fn rex_emit_section_hdr(buf: i64, p: i64, sec_id: i64, sec_len: i64): i64 {
+    let cur = rex_emit_u8(buf, p, sec_id);
+    cur = rex_emit_u32(buf, cur, sec_len);
+    return cur;
+}
+
+# --- Instruction Encoders ---
+
+fn rex_enc_const_i64(buf: i64, p: i64, dst: i64, val: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_CONST_I64);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_i64(buf, cur, val);
+    return cur;
+}
+
+fn rex_enc_const_i32(buf: i64, p: i64, dst: i64, val: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_CONST_I32);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_i32(buf, cur, val);
+    return cur;
+}
+
+fn rex_enc_move(buf: i64, p: i64, dst: i64, src: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_MOVE);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, src);
+    return cur;
+}
+
+fn rex_enc_bin_op(buf: i64, p: i64, op: i64, dst: i64, s1: i64, s2: i64): i64 {
+    let cur = rex_emit_u8(buf, p, op);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, s1);
+    cur = rex_emit_u16(buf, cur, s2);
+    return cur;
+}
+
+fn rex_enc_unary_op(buf: i64, p: i64, op: i64, dst: i64, src: i64): i64 {
+    let cur = rex_emit_u8(buf, p, op);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, src);
+    return cur;
+}
+
+fn rex_enc_jump(buf: i64, p: i64, target_pc: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_JUMP);
+    cur = rex_emit_u32(buf, cur, target_pc);
+    return cur;
+}
+
+fn rex_enc_branch(buf: i64, p: i64, cond: i64, target_t: i64, target_f: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_BRANCH);
+    cur = rex_emit_u16(buf, cur, cond);
+    cur = rex_emit_u32(buf, cur, target_t);
+    cur = rex_emit_u32(buf, cur, target_f);
+    return cur;
+}
+
+fn rex_enc_call(buf: i64, p: i64, dst: i64, func_idx: i64, arg_cnt: i64, args_buf: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_CALL);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u32(buf, cur, func_idx);
+    cur = rex_emit_u16(buf, cur, arg_cnt);
+    let i = 0;
+    while i < arg_cnt {
+        let arg_slot = get_qword(args_buf, i);
+        cur = rex_emit_u16(buf, cur, arg_slot);
+        i = i + 1;
+    }
+    return cur;
+}
+
+fn rex_enc_return(buf: i64, p: i64, src: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_RETURN);
+    cur = rex_emit_u16(buf, cur, src);
+    return cur;
+}
+
+fn rex_enc_trap(buf: i64, p: i64, code: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_TRAP);
+    cur = rex_emit_u16(buf, cur, code);
+    return cur;
+}
+
+fn rex_enc_load64(buf: i64, p: i64, dst: i64, base: i64, offset: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_LOAD_64);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, base);
+    cur = rex_emit_i32(buf, cur, offset);
+    return cur;
+}
+
+fn rex_enc_store64(buf: i64, p: i64, base: i64, val: i64, offset: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_STORE_64);
+    cur = rex_emit_u16(buf, cur, base);
+    cur = rex_emit_u16(buf, cur, val);
+    cur = rex_emit_i32(buf, cur, offset);
+    return cur;
+}
+
+fn rex_enc_alloc_mem(buf: i64, p: i64, dst: i64, size: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_ALLOC_MEM);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u32(buf, cur, size);
+    return cur;
+}
+
+fn rex_enc_addr_local(buf: i64, p: i64, dst: i64, offset: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_ADDR_LOCAL);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u32(buf, cur, offset);
+    return cur;
+}

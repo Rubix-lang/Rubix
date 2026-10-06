@@ -1,0 +1,35 @@
+@import "base.css";
+
+@media (max-width: 600px) {
+  .resp {
+    size: sm;
+  }
+}
+
+.outer {
+  bg: surface;
+  .inner {
+    color: text;
+  }
+  &:hover {
+    pop;
+  }
+}
+
+.alert {
+  color: text !important;
+}
+
+.btn {
+  pointer: pointer;
+  z: 10;
+  op: 0.8;
+}
+
+.item {
+  fade in on in-view;
+}
+
+.spinner {
+  spin infinite;
+}

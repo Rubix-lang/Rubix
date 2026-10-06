@@ -1,0 +1,60 @@
+# TCP Test Server for Stream Verification
+
+fn tcp_read_until_eof(fd: Integer): String {
+    mut result = ""
+    mut chunk = tcp_read(fd)
+    loop length(chunk) > 0 {
+        result = result + chunk
+        chunk = tcp_read(fd)
+    }
+    result
+}
+
+fn main(): Integer {
+    let port = 38291
+    let sfd = tcp_listen(port)
+    if sfd < 0 {
+        print "LISTEN_FAIL"
+        1
+    } else {
+        print "SERVER_LISTENING"
+
+        # Connection 1: Testing available chunk reads & EOF
+        let cfd1 = tcp_accept(sfd)
+        if cfd1 < 0 {
+            print "ACCEPT_FAIL"
+            1
+        } else {
+            # Test 1: 1-byte read of available data
+            let req1 = tcp_read(cfd1)
+            let len1 = length(req1)
+            print "C1_CHUNK1_LEN: " + text(len1)
+            tcp_write(cfd1, "ACK1\n")
+
+            # Test 2: Chunk 2 on same socket
+            let req2 = tcp_read(cfd1)
+            let len2 = length(req2)
+            print "C1_CHUNK2_LEN: " + text(len2)
+            tcp_write(cfd1, "ACK2\n")
+
+            # Test 3: Read until EOF on client write-shutdown (accumulating 70,000 bytes)
+            let req3 = tcp_read_until_eof(cfd1)
+            let len3 = length(req3)
+            print "C1_FULL_STREAM_LEN: " + text(len3)
+            tcp_close(cfd1)
+
+            # Test 4: Second independent connection
+            let cfd2 = tcp_accept(sfd)
+            if cfd2 >= 0 {
+                let req_c2 = tcp_read(cfd2)
+                print "C2_DATA: " + req_c2
+                tcp_write(cfd2, "ACK_C2\n")
+                tcp_close(cfd2)
+            }
+
+            tcp_close(sfd)
+            print "SERVER_DONE"
+            0
+        }
+    }
+}

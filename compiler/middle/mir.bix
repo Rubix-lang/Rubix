@@ -1,0 +1,184 @@
+# mir.bix - mid-level intermediate representation and CFG verification
+
+
+# MIR Opcode Enums (handled via typed functions to avoid constant table bloat)
+# 1: ASSIGN, 2: BINOP, 3: UNARY, 4: CALL, 5: RETURN, 6: BRANCH, 7: JUMP, 8: DROP, 9: BOUNDS_CHECK, 10: PATTERN_MATCH
+
+fn mir_init(buf: i64): i64 {
+    set_qword(buf, 0, 0);          # inst_count = 0
+    set_qword(buf, 1, 0);          # block_count = 0
+    set_qword(buf, 2, 0);          # next_vreg = 0
+    set_qword(buf, 3, 1296646738); # MIR Magic: 0x4D495232 ('MIR2')
+    return 0;
+}
+
+fn mir_alloc_block(buf: i64): i64 {
+    let bc = get_qword(buf, 1);
+    if bc >= 1024 { return -1; }
+    let bb_meta = buf + 256 + (bc * 32);
+    set_qword(bb_meta, 0, bc); # block_id
+    set_qword(bb_meta, 1, 0);  # first_inst
+    set_qword(bb_meta, 2, 0);  # inst_count
+    set_qword(bb_meta, 3, 0);  # terminator_op = 0
+    set_qword(buf, 1, bc + 1);
+    return bc;
+}
+
+fn mir_emit(buf: i64, bb_id: i64, op: i64, dst: i64, s1: i64, s2: i64, extra: i64): i64 {
+    let ic = get_qword(buf, 0);
+    if ic >= 32768 { return -1; }
+
+    # Instructions start at offset 33024 (after 256 header + 32KB block metadata)
+    let inst_addr = buf + 33024 + (ic * 48);
+    set_qword(inst_addr, 0, op);
+    set_qword(inst_addr, 1, bb_id);
+    set_qword(inst_addr, 2, dst);
+    set_qword(inst_addr, 3, s1);
+    set_qword(inst_addr, 4, s2);
+    set_qword(inst_addr, 5, extra);
+
+    # Update block metadata if terminator
+    if (op == 5) | (op == 6) | (op == 7) {
+        if (bb_id >= 0) & (bb_id < get_qword(buf, 1)) {
+            let bb_meta = buf + 256 + (bb_id * 32);
+            set_qword(bb_meta, 3, op);
+        }
+    }
+
+    set_qword(buf, 0, ic + 1);
+    return ic;
+}
+
+# ------------------------------------------------------------------------------
+# MIR Verification Pass
+# Validates CFG well-formedness, basic block terminators, and edge target validity.
+# ------------------------------------------------------------------------------
+fn mir_verify_program(buf: i64): i64 {
+    let b_count = get_qword(buf, 1);
+    if b_count == 0 { return 0; } # Empty valid MIR
+
+    let i = 0;
+    while i < b_count {
+        let bb_meta = buf + 256 + (i * 32);
+        let term = get_qword(bb_meta, 3);
+        # Block must terminate with RETURN (5), BRANCH (6), or JUMP (7)
+        if (term != 5) & (term != 6) & (term != 7) {
+            # Unterminated basic block
+            return -1;
+        }
+        i = i + 1;
+    }
+
+    # Verify branch/jump targets
+    let i_count = get_qword(buf, 0);
+    let j = 0;
+    while j < i_count {
+        let inst_addr = buf + 33024 + (j * 48);
+        let op = get_qword(inst_addr, 0);
+
+        # JUMP: s1 is target_bb
+        if op == 7 {
+            let target_bb = get_qword(inst_addr, 3);
+            if (target_bb < 0) | (target_bb >= b_count) {
+                return -2; # Invalid jump target
+            }
+        }
+        # BRANCH: s1 is then_bb, s2 is else_bb
+        if op == 6 {
+            let then_bb = get_qword(inst_addr, 3);
+            let else_bb = get_qword(inst_addr, 4);
+            if (then_bb < 0) | (then_bb >= b_count) {
+                return -3; # Invalid then branch target
+            }
+            if (else_bb < 0) | (else_bb >= b_count) {
+                return -4; # Invalid else branch target
+            }
+        }
+        j = j + 1;
+    }
+
+    return 0; # MIR verification passed
+}
+
+fn mir_dump_op_name(op: i64): str {
+    if op == 1 { return "ASSIGN"; }
+    if op == 2 { return "BINOP"; }
+    if op == 3 { return "UNARY"; }
+    if op == 4 { return "CALL"; }
+    if op == 5 { return "RETURN"; }
+    if op == 6 { return "BRANCH"; }
+    if op == 7 { return "JUMP"; }
+    if op == 8 { return "DROP"; }
+    if op == 9 { return "BOUNDS_CHECK"; }
+    if op == 10 { return "MATCH"; }
+    return "UNKNOWN";
+}
+
+# ------------------------------------------------------------------------------
+# MIR Pipeline Lowering & Verification from UIR
+# Constructs CFG basic blocks and instructions from Universal IR and verifies invariants.
+# ------------------------------------------------------------------------------
+fn mir_build_from_uir(uir_buf: i64, mir_buf: i64): i64 {
+    let u_cnt = get_qword(uir_buf, 0);
+    if u_cnt == 0 { return 0; }
+
+    # Allocate initial basic block
+    let cur_bb = mir_alloc_block(mir_buf);
+    if cur_bb < 0 { return -1; }
+
+    let i = 0;
+    while i < u_cnt {
+        let n_addr = uir_buf + 256 + (i * 64);
+        let op = get_qword(n_addr, 0);
+        let dst = get_qword(n_addr, 4);
+        let s1 = get_qword(n_addr, 5);
+        let s2 = get_qword(n_addr, 6);
+        let extra = get_qword(n_addr, 7);
+
+        if (op == 1) | (op == 2) { # UIR_CONST, UIR_MOVE -> MIR ASSIGN
+            mir_emit(mir_buf, cur_bb, 1, dst, s1, s2, extra);
+        }
+        if (op >= 10) & (op <= 25) { # Arithmetic / Bitwise / Comparison -> MIR BINOP
+            mir_emit(mir_buf, cur_bb, 2, dst, s1, s2, extra);
+        }
+        if op == 44 { # INDEX_ADDR -> MIR BOUNDS_CHECK
+            mir_emit(mir_buf, cur_bb, 9, dst, s1, s2, extra);
+        }
+        if op == 56 { # UIR_CALL -> MIR CALL
+            mir_emit(mir_buf, cur_bb, 4, dst, s1, s2, extra);
+        }
+        if op == 57 { # UIR_RETURN -> MIR RETURN
+            mir_emit(mir_buf, cur_bb, 5, dst, s1, s2, extra);
+            if (i + 1) < u_cnt {
+                cur_bb = mir_alloc_block(mir_buf);
+            }
+        }
+        if op == 54 { # UIR_JUMP -> MIR JUMP
+            mir_emit(mir_buf, cur_bb, 7, 0, 0, 0, extra);
+            if (i + 1) < u_cnt {
+                cur_bb = mir_alloc_block(mir_buf);
+            }
+        }
+        if op == 55 { # UIR_BRANCH -> MIR BRANCH
+            mir_emit(mir_buf, cur_bb, 6, 0, 0, 0, extra);
+            if (i + 1) < u_cnt {
+                cur_bb = mir_alloc_block(mir_buf);
+            }
+        }
+
+        i = i + 1;
+    }
+
+    # Ensure last block has a terminator
+    let bc = get_qword(mir_buf, 1);
+    if bc > 0 {
+        let last_bb = bc - 1;
+        let bb_meta = mir_buf + 256 + (last_bb * 32);
+        let term = get_qword(bb_meta, 3);
+        if (term != 5) & (term != 6) & (term != 7) {
+            mir_emit(mir_buf, last_bb, 5, 0, 0, 0, 0); # add implicit RETURN
+        }
+    }
+
+    return 0;
+}

@@ -1,0 +1,46 @@
+# Binary search and number theory algorithms in Rubix.
+# Run with: rubix run examples/07_binary_search.bix
+
+# Checks if a number is an exact power of 2 (e.g. 1, 2, 4, 8, 16, 32, 64)
+fn is_power_of_two(n: Integer): Integer {
+    if n <= 0 {
+        return 0
+    }
+    mut val = n
+    loop val % 2 == 0 {
+        val = val / 2
+    }
+    if val == 1 {
+        1
+    } else {
+        0
+    }
+}
+
+# Integer square root: finds floor(sqrt(n))
+fn integer_sqrt(n: Integer): Integer {
+    if n < 0 {
+        return 0 - 1
+    }
+    mut r = 0
+    loop (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    r
+}
+
+fn main(): Integer {
+    print "Is 64 a power of 2? (1=yes, 0=no):"
+    print is_power_of_two(64)
+
+    print "Is 50 a power of 2? (1=yes, 0=no):"
+    print is_power_of_two(50)
+
+    print "Floor square root of 144:"
+    print integer_sqrt(144)
+
+    print "Floor square root of 50:"
+    print integer_sqrt(50)
+
+    0
+}

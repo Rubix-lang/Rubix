@@ -1,0 +1,132 @@
+# Comprehensive Security & Vulnerability Regression Test Suite for Rubix
+# Tests all 12 Security Invariants defined in implementation_plan.md
+
+fn assert_true(cond: Integer, test_name: String) {
+    if cond {
+        print "  [PASS] " + test_name
+    } else {
+        print "  [FAIL] " + test_name
+        panic("Assertion failed")
+    }
+}
+
+fn test_large_integer_math() {
+    print "--- 1. Integer Arithmetic & Monomorphization ---"
+    let a = 5000000
+    let b = 1
+    let c = a + b
+    assert_true(c == 5000001, "Large int addition: 5000000 + 1 == 5000001")
+    assert_true(a == 5000000, "Large int self-equality: 5000000 == 5000000")
+    assert_true(a != 5000001, "Large int inequality: 5000000 != 5000001")
+
+    # Timestamp math
+    let ts = 1740000000
+    let ts_future = ts + 3600
+    assert_true(ts_future == 1740003600, "Timestamp arithmetic: 1740000000 + 3600 == 1740003600")
+
+    # Negative arithmetic
+    let neg1 = 0 - 1000
+    let neg2 = 500
+    let neg_res = neg1 + neg2
+    assert_true(neg_res == 0 - 500, "Negative addition: -1000 + 500 == -500")
+
+    # Two's complement modular wrapping arithmetic at 64-bit boundary
+    let max_i64 = 9223372036854775807
+    let wrapped = max_i64 + 1
+    assert_true(wrapped < 0, "64-bit modular wrapping preserves two complement arithmetic")
+}
+
+fn test_poly_len_safety() {
+    print "--- 2. poly_len Type & Memory Safety ---"
+    let s = "RubixProgramming"
+    assert_true(length(s) == 16, "String length: 'RubixProgramming' has len 16")
+    assert_true(length("") == 0, "Empty string has len 0")
+    
+    # Integer must not be dereferenced as a pointer: safe return 0
+    let int_val = 5000000
+    assert_true(length(int_val) == 0, "Length on untagged int returns 0 without segfault")
+}
+
+fn test_string_concat_and_eq() {
+    print "--- 3. String Concat & Equality ---"
+    let s1 = "Hello "
+    let s2 = "Rubix 2026"
+    let s3 = s1 + s2
+    assert_true(s3 == "Hello Rubix 2026", "String concatenation creates valid string")
+    assert_true(s3 != "Hello Rubix 2025", "String inequality check works")
+}
+
+fn test_substring_memory_safety() {
+    print "--- 4. Substring Bounds Clamping & Safety ---"
+    let src = "RubixProgrammingLanguage"
+    let sub1 = substring(src, 0, 5)
+    assert_true(sub1 == "Rubix", "Standard slice: substring(src, 0, 5) == 'Rubix'")
+
+    # End clamped to strlen
+    let sub2 = substring(src, 0, 999999)
+    assert_true(sub2 == src, "End > strlen clamped to strlen")
+
+    # Negative start clamped to 0
+    let neg_start = 0 - 10
+    let sub3 = substring(src, neg_start, 5)
+    assert_true(sub3 == "Rubix", "Start < 0 clamped to 0")
+
+    # Inverted range start > end returns empty string
+    let sub4 = substring(src, 10, 5)
+    assert_true(sub4 == "", "Inverted range (start > end) returns empty string")
+
+    # Exact boundary slice
+    let sub5 = substring(src, 0, 24)
+    assert_true(sub5 == src, "Exact boundary slice matches full string")
+}
+
+fn test_memory_primitives() {
+    print "--- 5. Tracked Memory Access & Capacity Boundaries ---"
+    let buf = alloc(64)
+    
+    # Exact capacity boundary: 8-byte write at offset 56 (56 + 8 = 64 <= capacity)
+    set_i64_at(buf, 56, 12345678)
+    let v64 = get_i64_at(buf, 56)
+    assert_true(v64 == 12345678, "set_i64_at / get_i64_at at exact boundary (capacity - 8)")
+
+    # 4-byte write at offset 60 (60 + 4 = 64 <= capacity)
+    set_i32_at(buf, 60, 4294967)
+    let v32 = get_i32_at(buf, 60)
+    assert_true(v32 == 4294967, "set_i32_at / get_i32_at at exact boundary (capacity - 4)")
+
+    # 1-byte write at offset 63 (63 + 1 = 64 <= capacity)
+    set_byte_at(buf, 63, 255)
+    let v8 = byte_at(buf, 63)
+    assert_true(v8 == 255, "set_byte_at / byte_at at exact boundary (capacity - 1)")
+}
+
+fn test_large_file_io() {
+    print "--- 6. Dynamic File I/O (>64KB without Static Buffer) ---"
+    let path = "/tmp/large_test_input.txt"
+    let content = read_file(path)
+    let flen = string_length(content)
+    assert_true(flen == 100000, "100KB file read completely without truncation")
+    
+    let b1 = byte_at(content, 69999)
+    let b2 = byte_at(content, 70000)
+    let b3 = byte_at(content, 99999)
+    assert_true(b1 == 65, "Byte 69999 before chunk boundary is 'A'")
+    assert_true(b2 == 66, "Byte 70000 after chunk boundary is 'B'")
+    assert_true(b3 == 66, "Byte 99999 at end of file is 'B'")
+}
+
+fn main(): Integer {
+    print "=========================================================="
+    print "  RUBIX SECURITY & VULNERABILITY REGRESSION TEST SUITE   "
+    print "=========================================================="
+    test_large_integer_math()
+    test_poly_len_safety()
+    test_string_concat_and_eq()
+    test_substring_memory_safety()
+    test_memory_primitives()
+    test_large_file_io()
+    print "=========================================================="
+    print "  ALL SECURITY REGRESSION TESTS PASSED SUCCESSFULLY!     "
+    print "=========================================================="
+    0
+}

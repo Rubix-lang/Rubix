@@ -1,0 +1,218 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native Resolver (rubix/rcs/resolver.bix)
+# Cascade resolution, specificity ordering, and value-to-IR mapping.
+# Maps RCS declarations into Webbix typed enum values.
+# Zero CSS strings at output.
+# ==============================================================================
+
+use rcs.ast;
+use rcs.tokens;
+use rcs.motion;
+use webbix.ir.types;
+
+# --- Specificity Score ---
+# Simple specificity: ID = 100, class/pseudo = 10, tag = 1
+fn rcs_specificity(selector: str): i64 {
+    let len = string_length(selector);
+    if len == 0 { return 0; }
+
+    let first = selector[0] as i64;
+    # '#' = 35 -> ID selector
+    if first == 35 { return 100; }
+    # '.' = 46 -> class selector
+    if first == 46 { return 10; }
+    # ':' = 58 -> pseudo-class
+    if first == 58 { return 10; }
+    # Otherwise -> tag selector
+    return 1;
+}
+
+# --- Sort rules by specificity (stable insertion sort, ascending) ---
+fn rcs_sort_by_specificity(rules: *RcsRule, count: i64): void {
+    let i = 1;
+    while i < count {
+        let key_sel = rules[i].selector;
+        let key_spec = rcs_specificity(key_sel);
+        let key_decl = rules[i].decl_count;
+        let key_mot = rules[i].motion_count;
+        let key_state = rules[i].state_condition;
+
+        let j = i - 1;
+        while (j >= 0) & (rcs_specificity(rules[j].selector) > key_spec) {
+            rules[j + 1].selector = rules[j].selector;
+            rules[j + 1].decl_count = rules[j].decl_count;
+            rules[j + 1].motion_count = rules[j].motion_count;
+            rules[j + 1].state_condition = rules[j].state_condition;
+            j = j - 1;
+        }
+        rules[j + 1].selector = key_sel;
+        rules[j + 1].decl_count = key_decl;
+        rules[j + 1].motion_count = key_mot;
+        rules[j + 1].state_condition = key_state;
+        i = i + 1;
+    }
+}
+
+# --- Resolve a property name + value pair into WebStyle enum values ---
+# Returns the resolved CSS value string (with theme tokens expanded)
+fn rcs_resolve_value(prop: str, val: str): str {
+    let clean = string_trim(val);
+    let is_important = string_ends_with(clean, "!important");
+    let base_val = clean;
+    if is_important {
+        let l = string_length(clean);
+        if l > 10 {
+            base_val = string_trim(string_slice(clean, 0, l - 10));
+        }
+    }
+
+    let resolved = base_val;
+    if str_eq(prop, "border-radius") {
+        resolved = rcs_map_radius_value(base_val);
+    } else {
+        if str_eq(prop, "box-shadow") {
+            resolved = rcs_map_shadow_value(base_val);
+        } else {
+            if str_eq(prop, "font-size") {
+                resolved = rcs_map_size_value(base_val);
+            } else {
+                if str_eq(prop, "font-weight") {
+                    resolved = rcs_map_weight_value(base_val);
+                } else {
+                    if str_eq(prop, "background") | str_eq(prop, "color") | str_eq(prop, "border-color") {
+                        resolved = rcs_map_color_token(base_val);
+                    }
+                }
+            }
+        }
+    }
+
+    if is_important {
+        return resolved + " !important";
+    }
+    return resolved;
+}
+
+# --- Map resolved radius value to WebRadius enum ---
+fn rcs_to_web_radius(val: str): i64 {
+    if str_eq(val, "0px")    { return WebRadius.None; }
+    if str_eq(val, "6px")    { return WebRadius.Sm; }
+    if str_eq(val, "10px")   { return WebRadius.Md; }
+    if str_eq(val, "12px")   { return WebRadius.Lg; }
+    if str_eq(val, "16px")   { return WebRadius.Xl; }
+    if str_eq(val, "9999px") { return WebRadius.Full; }
+    # Numeric fallback: attempt to categorize
+    return WebRadius.Md;
+}
+
+# --- Map resolved shadow value to WebShadow enum ---
+fn rcs_to_web_shadow(val: str): i64 {
+    if str_eq(val, "none") { return WebShadow.None; }
+    if string_contains(val, "1px 2px") { return WebShadow.Sm; }
+    if string_contains(val, "4px 8px") { return WebShadow.Md; }
+    if string_contains(val, "12px 24px") { return WebShadow.Lg; }
+    return WebShadow.Md;
+}
+
+# --- Map resolved font-size value to WebTextSize enum ---
+fn rcs_to_web_text_size(val: str): i64 {
+    if str_eq(val, "12px") { return WebTextSize.Xs; }
+    if str_eq(val, "13px") { return WebTextSize.Sm; }
+    if str_eq(val, "15px") { return WebTextSize.Md; }
+    if str_eq(val, "18px") { return WebTextSize.Lg; }
+    if str_eq(val, "24px") { return WebTextSize.Xl; }
+    if str_eq(val, "32px") { return WebTextSize.Xl2; }
+    if str_eq(val, "44px") { return WebTextSize.Xl3; }
+    return WebTextSize.Md;
+}
+
+# --- Map resolved font-weight value to WebWeight enum ---
+fn rcs_to_web_weight(val: str): i64 {
+    if str_eq(val, "300") { return WebWeight.Light; }
+    if str_eq(val, "400") { return WebWeight.Normal; }
+    if str_eq(val, "500") { return WebWeight.Medium; }
+    if str_eq(val, "600") { return WebWeight.SemiBold; }
+    if str_eq(val, "700") { return WebWeight.Bold; }
+    if str_eq(val, "800") { return WebWeight.ExtraBold; }
+    return WebWeight.Normal;
+}
+
+# --- Map resolved color token to WebColor enum ---
+fn rcs_to_web_color(val: str): i64 {
+    if string_contains(val, "--bg")         { return WebColor.White; }
+    if string_contains(val, "--surface")    { return WebColor.White; }
+    if string_contains(val, "--accent")     { return WebColor.Accent; }
+    if string_contains(val, "--text-muted") { return WebColor.Muted; }
+    if string_contains(val, "--text")       { return WebColor.Black; }
+    if string_contains(val, "--border")     { return WebColor.Gray200; }
+    if string_contains(val, "--success")    { return WebColor.Success; }
+    if string_contains(val, "--danger")     { return WebColor.Danger; }
+    if string_contains(val, "--warn")       { return WebColor.Warning; }
+    if str_eq(val, "transparent") { return WebColor.Transparent; }
+    return WebColor.Default;
+}
+
+# --- Map motion verb + direction to WebAnimation enum ---
+fn rcs_to_web_animation(verb: str, direction: str): i64 {
+    if str_eq(verb, "fade") {
+        if str_eq(direction, "out") { return WebAnimation.FadeOut; }
+        return WebAnimation.FadeIn;
+    }
+    if str_eq(verb, "slide") {
+        if str_eq(direction, "down")  { return WebAnimation.SlideDown; }
+        if str_eq(direction, "left")  { return WebAnimation.SlideLeft; }
+        if str_eq(direction, "right") { return WebAnimation.SlideRight; }
+        return WebAnimation.SlideUp;
+    }
+    if str_eq(verb, "pop") | str_eq(verb, "zoom") {
+        return WebAnimation.ScaleUp;
+    }
+    if str_eq(verb, "bounce") { return WebAnimation.Bounce; }
+    if str_eq(verb, "pulse")  { return WebAnimation.Pulse; }
+    if str_eq(verb, "spin")   { return WebAnimation.Spin; }
+    if str_eq(verb, "shake")  { return WebAnimation.Shake; }
+    if str_eq(verb, "glow")   { return WebAnimation.Glow; }
+    if str_eq(verb, "float")  { return WebAnimation.Float; }
+    if str_eq(verb, "flip")   { return WebAnimation.Flip; }
+    return WebAnimation.None;
+}
+
+# --- Map trigger word to WebAnimTrigger enum ---
+fn rcs_to_web_trigger(trigger: str): i64 {
+    if str_eq(trigger, "load")  { return WebAnimTrigger.Mount; }
+    if str_eq(trigger, "hover") { return WebAnimTrigger.Hover; }
+    if str_eq(trigger, "focus") { return WebAnimTrigger.Focus; }
+    if str_eq(trigger, "click") { return WebAnimTrigger.Click; }
+    return WebAnimTrigger.Mount;
+}
+
+# --- Map layout keyword to WebLayout enum ---
+fn rcs_to_web_layout(val: str): i64 {
+    if str_eq(val, "row")    { return WebLayout.Row; }
+    if str_eq(val, "col")    { return WebLayout.Column; }
+    if str_eq(val, "column") { return WebLayout.Column; }
+    if str_eq(val, "grid")   { return WebLayout.Grid; }
+    if str_eq(val, "stack")  { return WebLayout.Stack; }
+    if str_eq(val, "flex")   { return WebLayout.Flex; }
+    return WebLayout.Column;
+}
+
+# --- Check if a selector matches a node by class, id, or tag ---
+fn rcs_selector_matches(selector: str, node_class: str, node_tag: str): bool {
+    let len = string_length(selector);
+    if len == 0 { return false; }
+
+    let first = selector[0] as i64;
+    # Class selector: ".card" matches node_class "card"
+    if first == 46 {
+        let class_part = string_slice(selector, 1, len - 1);
+        return str_eq(class_part, node_class);
+    }
+    # ID selector: "#main" matches node with that id
+    if first == 35 {
+        let id_part = string_slice(selector, 1, len - 1);
+        return str_eq(id_part, node_class);
+    }
+    # Tag selector: "button" matches node_tag "button"
+    return str_eq(selector, node_tag);
+}

@@ -1,0 +1,116 @@
+
+# =====================================================================
+# RUBIX ARRAY CHEAT-SHEET
+# Every array syntax verified by the ergonomics test suites.
+# main() returns 42 if all array operations work together.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 1. INFERRED ARRAY LITERAL  (type guessed from the values)
+# ---------------------------------------------------------------------
+fn main(): i64 {
+    let nums = [1, 2, 3, 4];
+
+    # -----------------------------------------------------------------
+    # 2. INDEXING   (zero-based, like C/JS/Python)
+    # -----------------------------------------------------------------
+    let first = nums[0];
+    let last = nums[3];
+
+    # -----------------------------------------------------------------
+    # 3. TYPED ARRAY  (declared length + element type)
+    # -----------------------------------------------------------------
+    let typed: [i64; 4] = [10, 20, 30, 40];
+
+    # -----------------------------------------------------------------
+    # 4. RANGE FOR-LOOP with index  (for i in 0..N)
+    # -----------------------------------------------------------------
+    let sum_idx = 0;
+    for i in 0..4 {
+        sum_idx = sum_idx + nums[i];
+    }
+
+    # -----------------------------------------------------------------
+    # 5. COLLECTION FOR-IN  (for x in arr, no index needed)
+    # -----------------------------------------------------------------
+    let sum_val = 0;
+    for x in nums {
+        sum_val = sum_val + x;
+    }
+
+    # -----------------------------------------------------------------
+    # 6. ENUMERATED FOR-LOOP  (for i, val in arr: index + value)
+    # -----------------------------------------------------------------
+    let acc_enum = 0;
+    for i, val in nums {
+        acc_enum = acc_enum + (i * 100) + val;
+    }
+
+    # -----------------------------------------------------------------
+    # 7. DESTRUCTURING  (unpack array into variables)
+    # -----------------------------------------------------------------
+    let pair = [40, 2];
+    let [a, b] = pair;
+
+    # -----------------------------------------------------------------
+    # 8. IMMEDIATE DESTRUCTURE  (from literal directly)
+    # -----------------------------------------------------------------
+    let [x, y] = [15, 27];
+
+    # -----------------------------------------------------------------
+    # 9. ARRAYS AS FUNCTION PARAMS  (typed: [elem; length])
+    # -----------------------------------------------------------------
+    let s = sum_arr(nums);   # 1+2+3+4 = 10
+
+    # -----------------------------------------------------------------
+    # 10. std.collections helpers  (sum_4, min_4, max_4, contains_4, find_4)
+    # -----------------------------------------------------------------
+    use std.collections;
+    let col_sum = sum_4(nums);       # 10
+    let col_min = min_4(nums);       # 1
+    let col_max = max_4(nums);       # 4
+    let col_has = contains_4(nums, 3);
+    let col_idx = find_4(nums, 2);   # 1
+
+    # -----------------------------------------------------------------
+    # 11. COMPOSITION: array + enumerated loop + match + pipeline
+    # -----------------------------------------------------------------
+    let weights = [5, 10, 15];
+    let composed = 0;
+    for idx, elem in weights {
+        let w = match idx {
+            0 => 1,
+            1 => 2,
+            _ => 3
+        };
+        composed = composed + ((elem |> double) * w);
+    }
+
+    # all array results combine to 42
+    return (first - 1) + (last - 4)
+         + (typed[1] - 20)
+         + (sum_idx - 10) + (sum_val - 10)
+         + (acc_enum - 360)
+         + (a + b - 42) + (x + y - 42)
+         + (s - 10)
+         + (col_sum - 10) + (col_min - 1) + (col_max - 4)
+         + (col_has - 1) + (col_idx - 1)
+         + (composed - 140)
+         + 42;
+}
+
+# ---------------------------------------------------------------------
+# Helper: typed array parameter, iterated with collection for-in
+# ---------------------------------------------------------------------
+fn sum_arr(arr: [i64; 4]): i64 {
+    let sum = 0;
+    for x in arr {
+        sum = sum + x;
+    }
+    return sum;
+}
+
+# ---------------------------------------------------------------------
+# Helper: expression-bodied function used in the pipeline
+# ---------------------------------------------------------------------
+fn double(x: i64): i64 = x * 2;

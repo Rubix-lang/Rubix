@@ -1,0 +1,155 @@
+# ==============================================================================
+# Rubix Universal Machine Synthesis (RUMS) — Target Machine Description
+# Target Architecture: RISC-V 64 (RV64GC)
+# Standard RISC-V Calling Convention
+# ==============================================================================
+
+target riscv64 {
+    machine_format_version: 1;
+    word_size: 8;
+    endianness: little;
+    stack_alignment: 16;
+    stack_direction: down;
+    instruction_width: 4; # Standard 32-bit instructions (or compressed 16-bit)
+    pc_relative_calls: true;
+}
+
+registers {
+    # id  name   role           callee_saved  class
+    reg 0  zero  hardwired_zero false         special;
+    reg 1  ra    return_addr    false         special; # Link register
+    reg 2  sp    stack_ptr      true          special;
+    reg 3  gp    global_ptr     false         special;
+    reg 4  tp    thread_ptr     false         special;
+    reg 5  t0    scratch        false         general;
+    reg 6  t1    scratch        false         general;
+    reg 7  t2    scratch        false         general;
+    reg 8  s0    frame_ptr      true          general; # s0 / fp
+    reg 9  s1    preserved      true          general;
+    reg 10 a0    arg1_ret       false         general;
+    reg 11 a1    arg2_ret       false         general;
+    reg 12 a2    arg3           false         general;
+    reg 13 a3    arg4           false         general;
+    reg 14 a4    arg5           false         general;
+    reg 15 a5    arg6           false         general;
+    reg 16 a6    arg7           false         general;
+    reg 17 a7    arg8           false         general;
+    reg 18 s2    preserved      true          general;
+    reg 19 s3    preserved      true          general;
+    reg 20 s4    preserved      true          general;
+    reg 21 s5    preserved      true          general;
+    reg 22 s6    preserved      true          general;
+    reg 23 s7    preserved      true          general;
+    reg 24 s8    preserved      true          general;
+    reg 25 s9    preserved      true          general;
+    reg 26 s10   preserved      true          general;
+    reg 27 s11   preserved      true          general;
+    reg 28 t3    scratch        false         general;
+    reg 29 t4    scratch        false         general;
+    reg 30 t5    scratch        false         general;
+    reg 31 t6    scratch        false         general;
+}
+
+calling_convention standard {
+    args: [a0, a1, a2, a3, a4, a5, a6, a7];
+    return_reg: a0;
+    scratch_pool: [a0, a1, a2, a3, a4, a5, a6, a7, t0, t1, t2, t3, t4, t5, t6];
+    preserved_pool: [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11];
+    link_register: ra;
+    frame_pointer: s0;
+}
+
+patterns {
+    pattern ADD_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00000033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern SUB_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x40000033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern AND_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00007033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern OR_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00006033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern XOR_REG_REG(dst, src1, src2) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00004033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    # Shifts, Multiply & Division (M-extension)
+    pattern SLLI_REG_IMM(dst, src, imm) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00001013 | ((imm & 0x3F) << 20) | (REG_ID(src) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern SRLI_REG_IMM(dst, src, imm) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00005013 | ((imm & 0x3F) << 20) | (REG_ID(src) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern MUL_REG_REG(dst, src1, src2) {
+        cost: 2;
+        latency: 2;
+        encoding_u32: 0x02000033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern DIV_REG_REG(dst, src1, src2) {
+        cost: 8;
+        latency: 8;
+        encoding_u32: 0x02004033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern REM_REG_REG(dst, src1, src2) {
+        cost: 8;
+        latency: 8;
+        encoding_u32: 0x02006033 | (REG_ID(src2) << 20) | (REG_ID(src1) << 15) | (REG_ID(dst) << 7);
+    }
+
+    # Memory Access
+    pattern LD_REG_MEM(dst, base, disp) {
+        cost: 2;
+        latency: 3;
+        encoding_u32: 0x00003003 | ((disp & 0xFFF) << 20) | (REG_ID(base) << 15) | (REG_ID(dst) << 7);
+    }
+
+    pattern SD_MEM_REG(src, base, disp) {
+        cost: 2;
+        latency: 2;
+        encoding_u32: 0x00003023 | (((disp >> 5) & 0x7F) << 25) | (REG_ID(src) << 20) | (REG_ID(base) << 15) | ((disp & 0x1F) << 7);
+    }
+
+    pattern RET() {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00008067; # jalr x0, 0(ra)
+    }
+
+    # Vector / SIMD AI Acceleration Patterns (RISC-V RVV)
+    pattern VEC_FMA(dst, src1, src2) {
+        cost: 2;
+        latency: 4;
+        encoding_u32: 0xBC001057; # vfmacc.vv
+    }
+
+    pattern VEC_DOT(dst, src1, src2) {
+        cost: 2;
+        latency: 3;
+        encoding_u32: 0xEC001057; # vdot.vv
+    }
+}

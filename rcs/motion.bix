@@ -1,0 +1,82 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Motion Synthesizer (rubix/rcs/motion.bix)
+# Pure native feel-word curve lookups and timeline opcode synthesis.
+# Zero bezier math exposed to the user.
+# ==============================================================================
+
+# --- Feel Word to Duration (Milliseconds) ---
+fn rcs_feel_to_duration(feel: str): i64 {
+    if str_eq(feel, "instant") { return 0; }
+    if str_eq(feel, "snappy")  { return 120; }
+    if str_eq(feel, "smooth")  { return 250; }
+    if str_eq(feel, "gentle")  { return 500; }
+    if str_eq(feel, "slow")    { return 900; }
+    if str_eq(feel, "springy") | str_eq(feel, "bouncy") { return 450; }
+    return 250; # Default smooth
+}
+
+# --- Feel Word to CSS Timing Function ---
+fn rcs_feel_to_timing(feel: str): str {
+    if str_eq(feel, "instant") { return "linear"; }
+    if str_eq(feel, "snappy")  { return "cubic-bezier(0.2, 0, 0, 1)"; }
+    if str_eq(feel, "smooth")  { return "cubic-bezier(0.4, 0, 0.2, 1)"; }
+    if str_eq(feel, "gentle")  { return "ease-in-out"; }
+    if str_eq(feel, "slow")    { return "ease-in-out"; }
+    if str_eq(feel, "springy") | str_eq(feel, "bouncy") {
+        return "cubic-bezier(0.34, 1.56, 0.64, 1)";
+    }
+    return "cubic-bezier(0.4, 0, 0.2, 1)";
+}
+
+# --- Known Verb Checker ---
+fn rcs_is_motion_verb(w: str): bool {
+    if str_eq(w, "fade")   { return true; }
+    if str_eq(w, "slide")  { return true; }
+    if str_eq(w, "pop")    { return true; }
+    if str_eq(w, "zoom")   { return true; }
+    if str_eq(w, "bounce") { return true; }
+    if str_eq(w, "spin")   { return true; }
+    if str_eq(w, "flip")   { return true; }
+    if str_eq(w, "tilt")   { return true; }
+    if str_eq(w, "shake")  { return true; }
+    if str_eq(w, "pulse")  { return true; }
+    if str_eq(w, "glow")   { return true; }
+    if str_eq(w, "float")  { return true; }
+    if str_eq(w, "orbit")  { return true; }
+    return false;
+}
+
+# --- Known Trigger Checker ---
+fn rcs_is_trigger_word(w: str): bool {
+    if str_eq(w, "load")          { return true; }
+    if str_eq(w, "hover")         { return true; }
+    if str_eq(w, "focus")         { return true; }
+    if str_eq(w, "click")         { return true; }
+    if str_eq(w, "active")        { return true; }
+    if str_eq(w, "open")          { return true; }
+    if str_eq(w, "close")         { return true; }
+    if str_eq(w, "checked")       { return true; }
+    if str_eq(w, "disabled")      { return true; }
+    if str_eq(w, "focus-visible") { return true; }
+    if str_eq(w, "focus-within")  { return true; }
+    if str_eq(w, "scroll")        { return true; }
+    if str_eq(w, "in-view")       { return true; }
+    if str_eq(w, "visible")       { return true; }
+    return false;
+}
+
+# --- Opcode Name Mapping ---
+fn rcs_verb_to_opcode(verb: str): str {
+    if str_eq(verb, "slide") { return "TRANSLATE"; }
+    if str_eq(verb, "fade")  { return "FADE"; }
+    if str_eq(verb, "pop")   { return "POP"; }
+    if str_eq(verb, "zoom")  { return "SCALE"; }
+    if str_eq(verb, "pulse") { return "PULSE"; }
+    if str_eq(verb, "glow")  { return "GLOW"; }
+    if str_eq(verb, "spin")  { return "ROTATE"; }
+    if str_eq(verb, "flip")  { return "FLIP"; }
+    if str_eq(verb, "tilt")  { return "TILT"; }
+    if str_eq(verb, "float") { return "FLOAT"; }
+    if str_eq(verb, "orbit") { return "ORBIT"; }
+    return "UNKNOWN";
+}

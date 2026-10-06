@@ -1,0 +1,221 @@
+# tests/test_std_wire.bix
+# Direct verification of std/wire.bix binary serialization with Buffer (Type ID 9)
+
+fn OP_BEGIN_FRAME(): Integer { 1 }
+fn OP_DRAW_RECT(): Integer { 2 }
+fn OP_DRAW_TEXT(): Integer { 3 }
+fn OP_DRAW_LINE(): Integer { 4 }
+fn OP_DRAW_CIRCLE(): Integer { 5 }
+fn OP_BIND_HITBOX(): Integer { 6 }
+fn OP_CLIP_DIRTY(): Integer { 7 }
+fn OP_UPDATE_WIDGET(): Integer { 8 }
+fn OP_TEXT_INPUT(): Integer { 9 }
+fn OP_NAVIGATE(): Integer { 10 }
+fn OP_FORM_SUBMIT(): Integer { 11 }
+fn OP_END_FRAME(): Integer { 255 }
+
+fn wire_align4(n: Integer): Integer {
+    let rem = n % 4
+    if rem == 0 {
+        return n
+    }
+    n + (4 - rem)
+}
+
+fn sz_op_begin_frame(): Integer { 16 }
+fn sz_op_draw_rect(): Integer { 16 }
+fn sz_op_draw_line(): Integer { 16 }
+fn sz_op_draw_circle(): Integer { 12 }
+fn sz_op_bind_hitbox(): Integer { 16 }
+fn sz_op_clip_dirty(): Integer { 12 }
+fn sz_op_end_frame(): Integer { 12 }
+
+fn sz_op_draw_text(text_len: Integer): Integer {
+    16 + wire_align4(text_len)
+}
+
+fn sz_op_update_widget(payload_len: Integer): Integer {
+    12 + wire_align4(payload_len)
+}
+
+fn wire_next_offset(current_offset: Integer, op_size: Integer): Integer {
+    current_offset + op_size
+}
+
+def wire_create_buffer(capacity: Integer): Buffer do
+    alloc(capacity)
+end
+
+def wire_buffer_capacity(buf: Buffer): Integer do
+    length(buf)
+end
+
+def wire_buffer_remaining(buf: Buffer, current_off: Integer): Integer do
+    if length(buf) > current_off do
+        length(buf) - current_off
+    else do
+        0
+    end
+end
+
+fn wire_pack_begin_frame(buf: Buffer, off: Integer, w: Integer, h: Integer): Integer {
+    set_byte_at(buf, off, OP_BEGIN_FRAME())
+    set_byte_at(buf, off + 1, 0)
+    set_byte_at(buf, off + 2, 0)
+    set_byte_at(buf, off + 3, 0)
+    set_i32_at(buf, off + 4, w)
+    set_i32_at(buf, off + 8, h)
+    off + 16
+}
+
+fn wire_set_frame_bg(buf: Buffer, off: Integer, bg_rgba: Integer) {
+    set_i32_at(buf, off + 12, bg_rgba)
+}
+
+fn wire_pack_draw_rect(buf: Buffer, off: Integer, x: Integer, y: Integer): Integer {
+    set_byte_at(buf, off, OP_DRAW_RECT())
+    set_byte_at(buf, off + 1, 0)
+    set_i16_at(buf, off + 2, x)
+    set_i16_at(buf, off + 4, y)
+    off + 16
+}
+
+fn wire_set_rect_dim(buf: Buffer, off: Integer, w: Integer, h: Integer) {
+    set_i16_at(buf, off + 6, w)
+    set_i16_at(buf, off + 8, h)
+}
+
+fn wire_set_rect_style(buf: Buffer, off: Integer, radius: Integer, rgba: Integer) {
+    set_i16_at(buf, off + 10, radius)
+    set_i32_at(buf, off + 12, rgba)
+}
+
+fn wire_pack_draw_text(buf: Buffer, off: Integer, x: Integer, y: Integer): Integer {
+    set_byte_at(buf, off, OP_DRAW_TEXT())
+    set_byte_at(buf, off + 1, 0)
+    set_i16_at(buf, off + 2, x)
+    set_i16_at(buf, off + 4, y)
+    off
+}
+
+fn wire_set_text_data(buf: Buffer, off: Integer, size: Integer, text_str: String): Integer {
+    let tlen = string_length(text_str)
+    set_i16_at(buf, off + 6, size)
+    set_i16_at(buf, off + 8, 600)
+    set_i32_at(buf, off + 10, 4294967295)
+    set_i16_at(buf, off + 14, tlen)
+    if tlen > 0 {
+        wire_copy_str(buf, off + 16, text_str, tlen)
+    }
+    off + 16 + wire_align4(tlen)
+}
+
+fn wire_set_text_color(buf: Buffer, off: Integer, rgba: Integer) {
+    set_i32_at(buf, off + 10, rgba)
+}
+
+fn wire_pack_bind_hitbox(buf: Buffer, off: Integer, id: Integer, flags: Integer): Integer {
+    set_byte_at(buf, off, OP_BIND_HITBOX())
+    set_byte_at(buf, off + 1, 0)
+    set_i32_at(buf, off + 12, id)
+    off + 16
+}
+
+fn wire_set_hitbox_bounds(buf: Buffer, off: Integer, x: Integer, y: Integer) {
+    set_i16_at(buf, off + 2, x)
+    set_i16_at(buf, off + 4, y)
+}
+
+fn wire_set_hitbox_dim(buf: Buffer, off: Integer, w: Integer, h: Integer) {
+    set_i16_at(buf, off + 6, w)
+    set_i16_at(buf, off + 8, h)
+}
+
+fn wire_pack_end_frame(buf: Buffer, off: Integer, frame_id: Integer, crc32: Integer): Integer {
+    set_byte_at(buf, off, OP_END_FRAME())
+    set_byte_at(buf, off + 1, 0)
+    set_byte_at(buf, off + 2, 0)
+    set_byte_at(buf, off + 3, 0)
+    set_i32_at(buf, off + 4, frame_id)
+    set_i32_at(buf, off + 8, crc32)
+    off + 12
+}
+
+fn assert_val(actual: Integer, expected: Integer, label: String) {
+    if actual == expected {
+        print "  [PASS] " + label
+    } else {
+        print "  [FAIL] " + label + ": expected " + int_to_string(expected) + " got " + int_to_string(actual)
+    }
+}
+
+fn main(): Integer {
+    print "=================================================="
+    print "  RUNNING STD/WIRE BINARY PROTOCOL TEST SUITE"
+    print "=================================================="
+    
+    # 1. Initialize Buffer via wire_create_buffer
+    let raw_buf = wire_create_buffer(1024)
+    assert_val(wire_buffer_capacity(raw_buf), 1024, "Initial buffer capacity is 1024")
+    assert_val(wire_buffer_remaining(raw_buf, 0), 1024, "Initial remaining space is 1024")
+    
+    # 2. Begin Frame (OP 1, w=1920, h=1080)
+    mut off = wire_pack_begin_frame(raw_buf, 0, 1920, 1080)
+    wire_set_frame_bg(raw_buf, 0, 4278190335)
+    
+    assert_val(get_byte_at(raw_buf, 0), OP_BEGIN_FRAME(), "OP_BEGIN_FRAME opcode is 1")
+    assert_val(get_i32_at(raw_buf, 4), 1920, "Frame width is 1920")
+    assert_val(get_i32_at(raw_buf, 8), 1080, "Frame height is 1080")
+    assert_val(get_i32_at(raw_buf, 12), 4278190335, "Frame bg RGBA set")
+    assert_val(off, 16, "Offset after begin_frame is 16")
+    assert_val(wire_buffer_remaining(raw_buf, off), 1008, "Remaining space after begin_frame is 1008")
+    
+    # 3. Draw Rect (OP 2, x=50, y=100, w=400, h=300, radius=8, rgba=255)
+    let rect_off = off
+    off := wire_pack_draw_rect(raw_buf, rect_off, 50, 100)
+    wire_set_rect_dim(raw_buf, rect_off, 400, 300)
+    wire_set_rect_style(raw_buf, rect_off, 8, 255)
+    
+    assert_val(get_byte_at(raw_buf, rect_off), OP_DRAW_RECT(), "OP_DRAW_RECT opcode is 2")
+    assert_val(get_i16_at(raw_buf, rect_off + 2), 50, "Rect x is 50")
+    assert_val(get_i16_at(raw_buf, rect_off + 4), 100, "Rect y is 100")
+    assert_val(get_i16_at(raw_buf, rect_off + 6), 400, "Rect w is 400")
+    assert_val(get_i16_at(raw_buf, rect_off + 8), 300, "Rect h is 300")
+    assert_val(get_i16_at(raw_buf, rect_off + 10), 8, "Rect corner radius is 8")
+    assert_val(get_i32_at(raw_buf, rect_off + 12), 255, "Rect RGBA is 255")
+    assert_val(off, rect_off + 16, "Offset after draw_rect is 32")
+    
+    # 4. Draw Text (OP 3, x=10, y=20, size=18, text="Rubix")
+    let text_off = off
+    let base_text_off = wire_pack_draw_text(raw_buf, text_off, 10, 20)
+    assert_val(get_byte_at(raw_buf, text_off), OP_DRAW_TEXT(), "OP_DRAW_TEXT opcode is 3")
+    assert_val(get_i16_at(raw_buf, text_off + 2), 10, "Text x is 10")
+    assert_val(get_i16_at(raw_buf, text_off + 4), 20, "Text y is 20")
+    
+    off := wire_set_text_data(raw_buf, text_off, 18, "Rubix")
+    assert_val(get_i16_at(raw_buf, text_off + 6), 18, "Font size is 18")
+    assert_val(get_i16_at(raw_buf, text_off + 14), 5, "Text length is 5")
+    assert_val(get_byte_at(raw_buf, text_off + 16), 82, "Text byte 0 is 'R' (82)")
+    assert_val(get_byte_at(raw_buf, text_off + 20), 120, "Text byte 4 is 'x' (120)")
+    assert_val(off, text_off + 24, "Offset after draw_text aligned to 4 bytes is correct")
+    
+    # 5. Bind Hitbox (OP 6, id=777, flags=1)
+    let hit_off = off
+    off := wire_pack_bind_hitbox(raw_buf, hit_off, 777, 1)
+    wire_set_hitbox_bounds(raw_buf, hit_off, 50, 100)
+    wire_set_hitbox_dim(raw_buf, hit_off, 400, 300)
+    assert_val(get_byte_at(raw_buf, hit_off), OP_BIND_HITBOX(), "OP_BIND_HITBOX opcode is 6")
+    assert_val(get_i32_at(raw_buf, hit_off + 12), 777, "Hitbox ID is 777")
+    
+    # 6. End Frame (OP 255, frame_id=1, crc32=987654)
+    let end_off = off
+    off := wire_pack_end_frame(raw_buf, end_off, 1, 987654)
+    assert_val(get_byte_at(raw_buf, end_off), OP_END_FRAME(), "OP_END_FRAME opcode is 255")
+    assert_val(get_i32_at(raw_buf, end_off + 4), 1, "Frame ID is 1")
+    assert_val(get_i32_at(raw_buf, end_off + 8), 987654, "CRC32 is 987654")
+    
+    print "=================================================="
+    print "  ALL STD/WIRE PROTOCOL TESTS PASSED CLEANLY!"
+    print "=================================================="
+    0
+}

@@ -1,0 +1,80 @@
+# wasm.bix - WebAssembly binary module packaging
+# Emits minimal WASM binary format (.wasm) with single exported main function.
+
+let WASM_SECTION_TYPE = 1;
+let WASM_SECTION_FUNCTION = 3;
+let WASM_SECTION_EXPORT = 7;
+let WASM_SECTION_CODE = 10;
+let WASM_TYPE_I64 = 126; # 0x7E
+let WASM_OP_END = 11;    # 0x0B
+
+fn wasm_write_module(out_path: i64, code_buf: i64, code_len: i64): i64 {
+    let hdr_buf = sys_mmap_page();
+    let cur = 0;
+
+    # WASM magic "\0asm" and version 1
+    set_byte(hdr_buf, 0, 0);
+    set_byte(hdr_buf, 1, 97);  # 'a'
+    set_byte(hdr_buf, 2, 115); # 's'
+    set_byte(hdr_buf, 3, 109); # 'm'
+    set_byte(hdr_buf, 4, 1);
+    set_byte(hdr_buf, 5, 0);
+    set_byte(hdr_buf, 6, 0);
+    set_byte(hdr_buf, 7, 0);
+    cur = 8;
+
+    # Type section: 1 type, form 0x60 (func), 0 params, 1 result (i64)
+    set_byte(hdr_buf, cur, WASM_SECTION_TYPE); cur = cur + 1;
+    set_byte(hdr_buf, cur, 6); cur = cur + 1; # payload size
+    set_byte(hdr_buf, cur, 1); cur = cur + 1; # count
+    set_byte(hdr_buf, cur, 96); cur = cur + 1; # 0x60 func
+    set_byte(hdr_buf, cur, 0); cur = cur + 1;  # 0 params
+    set_byte(hdr_buf, cur, 1); cur = cur + 1;  # 1 result
+    set_byte(hdr_buf, cur, WASM_TYPE_I64); cur = cur + 1;
+
+    # Function section: maps func 0 to type 0
+    set_byte(hdr_buf, cur, WASM_SECTION_FUNCTION); cur = cur + 1;
+    set_byte(hdr_buf, cur, 2); cur = cur + 1; # payload size
+    set_byte(hdr_buf, cur, 1); cur = cur + 1; # 1 func
+    set_byte(hdr_buf, cur, 0); cur = cur + 1; # type index 0
+
+    # Export section: export "main" as func index 0
+    set_byte(hdr_buf, cur, WASM_SECTION_EXPORT); cur = cur + 1;
+    set_byte(hdr_buf, cur, 10); cur = cur + 1; # payload size
+    set_byte(hdr_buf, cur, 1); cur = cur + 1;  # 1 export
+    set_byte(hdr_buf, cur, 4); cur = cur + 1;  # name length = 4
+    set_byte(hdr_buf, cur, 109); cur = cur + 1; # 'm'
+    set_byte(hdr_buf, cur, 97); cur = cur + 1;  # 'a'
+    set_byte(hdr_buf, cur, 105); cur = cur + 1; # 'i'
+    set_byte(hdr_buf, cur, 110); cur = cur + 1; # 'n'
+    set_byte(hdr_buf, cur, 0); cur = cur + 1;   # kind: func (0)
+    set_byte(hdr_buf, cur, 0); cur = cur + 1;   # func index: 0
+
+    # Code section: 1 local count byte + bytecode + 0x0B (end)
+    let body_sz = 1 + code_len + 1;
+    let sec_sz = 1 + 1 + body_sz;
+    set_byte(hdr_buf, cur, WASM_SECTION_CODE); cur = cur + 1;
+    set_byte(hdr_buf, cur, sec_sz & 127); cur = cur + 1;
+    set_byte(hdr_buf, cur, 1); cur = cur + 1; # 1 function body
+    set_byte(hdr_buf, cur, body_sz & 127); cur = cur + 1;
+    set_byte(hdr_buf, cur, 0); cur = cur + 1; # 0 local decls
+
+    let out_fd = sys_open(out_path, 577, 493);
+    if out_fd < 0 {
+        sys_munmap(hdr_buf, 4096);
+        return -20;
+    }
+
+    sys_write_all(out_fd, hdr_buf, cur);
+    sys_munmap(hdr_buf, 4096);
+
+    sys_write_all(out_fd, code_buf, code_len);
+
+    let end_byte = sys_mmap_page();
+    set_byte(end_byte, 0, WASM_OP_END);
+    sys_write_all(out_fd, end_byte, 1);
+    sys_munmap(end_byte, 4096);
+
+    sys_close(out_fd);
+    return cur + code_len + 1;
+}

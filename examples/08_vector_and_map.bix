@@ -1,0 +1,64 @@
+use std.collections;
+
+fn main(): i64 {
+    print "=== 1. Dynamic Vector Demonstration ===";
+    let v = vec_new(4);
+    print "Initial capacity: ";
+    print vec_cap(v);
+
+    vec_push(v, 100);
+    vec_push(v, 250);
+    vec_push(v, 999);
+    vec_push(v, 12345);
+    # This 5th push triggers dynamic 2x growth (cap 4 -> 8)
+    vec_push(v, 67890);
+
+    print "Vector length:";
+    print vec_len(v);
+    print "Expanded capacity:";
+    print vec_cap(v);
+
+    print "Vector item [0]:";
+    print vec_get(v, 0);
+    print "Vector item [1]:";
+    print vec_get(v, 1);
+    print "Vector item [2]:";
+    print vec_get(v, 2);
+    print "Vector item [4]:";
+    print vec_get(v, 4);
+
+    # Mutation
+    vec_set(v, 1, 777);
+    print "Vector item [1] after set(1, 777):";
+    print vec_get(v, 1);
+
+    print "=== 2. Dynamic String Demonstration ===";
+    let s = str_new(8);
+    str_append(s, "Rubix 2026: Universal Runtime");
+    print "DynString length:";
+    print str_len(s);
+    print "First character ASCII:";
+    print str_get_byte(s, 0);
+
+    print "=== 3. Dynamic Hash Map Demonstration ===";
+    let m = map_new(16);
+    map_put(m, 101, 2026);
+    map_put(m, 102, 42);
+    map_put(m, 103, 9999);
+
+    print "Map size:";
+    print map_len(m);
+    print "Map lookup key 101:";
+    print map_get(m, 101);
+    print "Map lookup key 102:";
+    print map_get(m, 102);
+    print "Map lookup key 103:";
+    print map_get(m, 103);
+    print "Map has key 101 (1=yes):";
+    if map_has(m, 101) { print 1; } else { print 0; }
+    print "Map has key 999 (0=no):";
+    if map_has(m, 999) { print 1; } else { print 0; }
+
+    print "=== Dynamic Collections Verified Successfully ===";
+    return 0;
+}

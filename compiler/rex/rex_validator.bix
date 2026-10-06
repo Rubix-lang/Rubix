@@ -1,0 +1,399 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Pre-Execution Module Validator
+# File: compiler/rex/rex_validator.bix
+#
+# Validates REX binary modules before execution:
+# 1. Structural integrity (magic, version, sizes, section containment).
+# 2. Type system and function signature correctness.
+# 3. Value-slot bounds checking (all operand slots < function.local_count).
+# 4. Control-flow validity (all jumps/branches land on valid instruction starts).
+# 5. Call arity and export integrity.
+# Reject malformed or untrusted modules before execution without crashing the host.
+# ==============================================================================
+
+
+fn rex_validate_module(buf: i64, len: i64): i64 {
+    let hdr = sys_mmap_page();
+    let res = rex_decode_header(buf, len, hdr);
+    if res != REX_OK {
+        return res;
+    }
+
+    let total_size = get_qword(hdr, 2);
+    let sec_cnt = get_qword(hdr, 3);
+
+    let sec_tbl = sys_mmap_page();
+    res = rex_locate_sections(buf, total_size, sec_cnt, sec_tbl);
+    if res != REX_OK {
+        return res;
+    }
+
+    # 1. Validate Types Section
+    let types_off = get_qword(sec_tbl, REX_SEC_TYPES * 2 + 0);
+    let types_len = get_qword(sec_tbl, REX_SEC_TYPES * 2 + 1);
+    if types_len < 4 {
+        return REX_ERR_TRUNCATED;
+    }
+
+    let type_cnt = rex_read_u32(buf, types_off);
+    let tp = types_off + 4;
+    let types_end = types_off + types_len;
+
+    # Table to store type signature param counts and return types for later checking
+    # 256 types max in validation buffer: [param_cnt, ret_type]
+    let type_info_tbl = sys_mmap_page();
+
+    let ti = 0;
+    while ti < type_cnt {
+        if tp + 3 > types_end {
+            return REX_ERR_TRUNCATED;
+        }
+        let p_cnt = rex_read_u16(buf, tp);
+        tp = tp + 2;
+        if tp + p_cnt + 1 > types_end {
+            return REX_ERR_TRUNCATED;
+        }
+        let pi = 0;
+        while pi < p_cnt {
+            let pt = rex_read_u8(buf, tp + pi);
+            if (pt < REX_TYPE_I64) | (pt > REX_TYPE_PTR) {
+                return REX_ERR_TYPE_MISMATCH;
+            }
+            pi = pi + 1;
+        }
+        tp = tp + p_cnt;
+        let ret_t = rex_read_u8(buf, tp);
+        tp = tp + 1;
+        if ret_t > REX_TYPE_PTR {
+            return REX_ERR_TYPE_MISMATCH;
+        }
+
+        if ti < 256 {
+            set_qword(type_info_tbl, ti * 2 + 0, p_cnt);
+            set_qword(type_info_tbl, ti * 2 + 1, ret_t);
+        }
+        ti = ti + 1;
+    }
+
+    # 2. Validate Functions Section
+    let funcs_off = get_qword(sec_tbl, REX_SEC_FUNCTIONS * 2 + 0);
+    let funcs_len = get_qword(sec_tbl, REX_SEC_FUNCTIONS * 2 + 1);
+    if funcs_len < 4 {
+        return REX_ERR_TRUNCATED;
+    }
+
+    let func_cnt = rex_read_u32(buf, funcs_off);
+    let fp = funcs_off + 4;
+    let funcs_end = funcs_off + funcs_len;
+
+    # Function metadata table: [type_idx, local_cnt, code_off, code_len]
+    let func_info_tbl = sys_mmap(0, 65536, 3, 34, -1, 0);
+
+    let fi = 0;
+    while fi < func_cnt {
+        if fp + 6 > funcs_end {
+            return REX_ERR_TRUNCATED;
+        }
+        let t_idx = rex_read_u32(buf, fp);
+        let l_cnt = rex_read_u16(buf, fp + 4);
+        fp = fp + 6;
+
+        if t_idx >= type_cnt {
+            return REX_ERR_TYPE_MISMATCH;
+        }
+        let p_cnt = get_qword(type_info_tbl, t_idx * 2 + 0);
+        if l_cnt < p_cnt {
+            return REX_ERR_INVALID_VAL_SLOT;
+        }
+
+        set_qword(func_info_tbl, fi * 4 + 0, t_idx);
+        set_qword(func_info_tbl, fi * 4 + 1, l_cnt);
+        fi = fi + 1;
+    }
+
+    # 3. Validate Memory Section (if present)
+    let mem_off = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 0);
+    let mem_len = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 1);
+    if mem_len > 0 {
+        if mem_len < 8 { return REX_ERR_TRUNCATED; }
+        let init_b = rex_read_u32(buf, mem_off);
+        let max_b = rex_read_u32(buf, mem_off + 4);
+        if (init_b == 0) | (init_b > max_b) {
+            return REX_ERR_BAD_SECTION_LEN;
+        }
+    }
+
+    # 4. Validate Code Section
+    let code_off = get_qword(sec_tbl, REX_SEC_CODE * 2 + 0);
+    let code_len = get_qword(sec_tbl, REX_SEC_CODE * 2 + 1);
+    if code_len < 4 {
+        return REX_ERR_TRUNCATED;
+    }
+
+    let code_func_cnt = rex_read_u32(buf, code_off);
+    if code_func_cnt != func_cnt {
+        return REX_ERR_BAD_SECTION_LEN;
+    }
+
+    let cp = code_off + 4;
+    let code_end = code_off + code_len;
+
+    fi = 0;
+    while fi < func_cnt {
+        if cp + 4 > code_end {
+            return REX_ERR_TRUNCATED;
+        }
+        let body_len = rex_read_u32(buf, cp);
+        cp = cp + 4;
+        let body_start = cp;
+        let body_end = cp + body_len;
+        if body_end > code_end {
+            return REX_ERR_TRUNCATED;
+        }
+
+        set_qword(func_info_tbl, fi * 4 + 2, body_start);
+        set_qword(func_info_tbl, fi * 4 + 3, body_len);
+
+        let local_cnt = get_qword(func_info_tbl, fi * 4 + 1);
+        let t_idx = get_qword(func_info_tbl, fi * 4 + 0);
+        let ret_t = get_qword(type_info_tbl, t_idx * 2 + 1);
+
+        # Instruction boundaries table for this function: up to 4096 instructions
+        let inst_starts = sys_mmap(0, 32768, 3, 34, -1, 0);
+        let inst_cnt = 0;
+
+        # Pass 1: Decode & record instruction start offsets, check operand slots
+        let ip = body_start;
+        while ip < body_end {
+            let rel_offset = ip - body_start;
+            set_qword(inst_starts, inst_cnt, rel_offset);
+            inst_cnt = inst_cnt + 1;
+
+            let op = rex_read_u8(buf, ip);
+            ip = ip + 1;
+
+            let valid_op = 0;
+            if op == REX_OP_CONST_I64 {
+                if ip + 10 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                if dst >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 10;
+                valid_op = 1;
+            }
+            if op == REX_OP_CONST_I32 {
+                if ip + 6 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                if dst >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 6;
+                valid_op = 1;
+            }
+            if op == REX_OP_MOVE {
+                if ip + 4 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                let src = rex_read_u16(buf, ip + 2);
+                if (dst >= local_cnt) | (src >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 4;
+                valid_op = 1;
+            }
+            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SHR_I64) {
+                # Binary or Unary
+                if (op == REX_OP_NEG_I64) | (op == REX_OP_NOT_I64) {
+                    if ip + 4 > body_end { return REX_ERR_TRUNCATED; }
+                    let dst = rex_read_u16(buf, ip);
+                    let src = rex_read_u16(buf, ip + 2);
+                    if (dst >= local_cnt) | (src >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                    ip = ip + 4;
+                } else {
+                    if ip + 6 > body_end { return REX_ERR_TRUNCATED; }
+                    let dst = rex_read_u16(buf, ip);
+                    let s1 = rex_read_u16(buf, ip + 2);
+                    let s2 = rex_read_u16(buf, ip + 4);
+                    if (dst >= local_cnt) | (s1 >= local_cnt) | (s2 >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                    ip = ip + 6;
+                }
+                valid_op = 1;
+            }
+            if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) {
+                if ip + 6 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                if (dst >= local_cnt) | (s1 >= local_cnt) | (s2 >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 6;
+                valid_op = 1;
+            }
+            if op == REX_OP_JUMP {
+                if ip + 4 > body_end { return REX_ERR_TRUNCATED; }
+                ip = ip + 4;
+                valid_op = 1;
+            }
+            if op == REX_OP_BRANCH {
+                if ip + 10 > body_end { return REX_ERR_TRUNCATED; }
+                let cond = rex_read_u16(buf, ip);
+                if cond >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 10;
+                valid_op = 1;
+            }
+            if op == REX_OP_CALL {
+                if ip + 8 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                let call_fidx = rex_read_u32(buf, ip + 2);
+                let arg_cnt = rex_read_u16(buf, ip + 6);
+                ip = ip + 8;
+                if call_fidx >= func_cnt { return REX_ERR_INVALID_FUNC_IDX; }
+                if (dst != 65535) & (dst >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                if ip + (arg_cnt * 2) > body_end { return REX_ERR_TRUNCATED; }
+                let ai = 0;
+                while ai < arg_cnt {
+                    let aslot = rex_read_u16(buf, ip + (ai * 2));
+                    if aslot >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                    ai = ai + 1;
+                }
+                ip = ip + (arg_cnt * 2);
+                valid_op = 1;
+            }
+            if op == REX_OP_RETURN {
+                if ip + 2 > body_end { return REX_ERR_TRUNCATED; }
+                let rslot = rex_read_u16(buf, ip);
+                if ret_t == REX_TYPE_VOID {
+                    if rslot != 65535 { return REX_ERR_TYPE_MISMATCH; }
+                } else {
+                    if rslot >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                }
+                ip = ip + 2;
+                valid_op = 1;
+            }
+            if op == REX_OP_TRAP {
+                if ip + 2 > body_end { return REX_ERR_TRUNCATED; }
+                ip = ip + 2;
+                valid_op = 1;
+            }
+            if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) {
+                if ip + 8 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                let base = rex_read_u16(buf, ip + 2);
+                if (dst >= local_cnt) | (base >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 8;
+                valid_op = 1;
+            }
+            if (op == REX_OP_STORE_64) | (op == REX_OP_STORE_8) {
+                if ip + 8 > body_end { return REX_ERR_TRUNCATED; }
+                let base = rex_read_u16(buf, ip);
+                let val = rex_read_u16(buf, ip + 2);
+                if (base >= local_cnt) | (val >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 8;
+                valid_op = 1;
+            }
+            if op == REX_OP_ALLOC_MEM {
+                if ip + 6 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                if dst >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 6;
+                valid_op = 1;
+            }
+            if op == REX_OP_ADDR_LOCAL {
+                if ip + 6 > body_end { return REX_ERR_TRUNCATED; }
+                let dst = rex_read_u16(buf, ip);
+                if dst >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 6;
+                valid_op = 1;
+            }
+            if valid_op == 0 {
+                return REX_ERR_INVALID_OPCODE;
+            }
+        }
+
+        # Pass 2: Verify branch target validity
+        ip = body_start;
+        while ip < body_end {
+            let op = rex_read_u8(buf, ip);
+            ip = ip + 1;
+            if op == REX_OP_CONST_I64 { ip = ip + 10; }
+            if op == REX_OP_CONST_I32 { ip = ip + 6; }
+            if op == REX_OP_MOVE { ip = ip + 4; }
+            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SHR_I64) {
+                if (op == REX_OP_NEG_I64) | (op == REX_OP_NOT_I64) { ip = ip + 4; }
+                else { ip = ip + 6; }
+            }
+            if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) { ip = ip + 6; }
+            if op == REX_OP_JUMP {
+                let tgt = rex_read_u32(buf, ip);
+                ip = ip + 4;
+                let found = 0;
+                let ii = 0;
+                while ii < inst_cnt {
+                    if get_qword(inst_starts, ii) == tgt { found = 1; }
+                    ii = ii + 1;
+                }
+                if found == 0 { return REX_ERR_BAD_BRANCH_TGT; }
+            }
+            if op == REX_OP_BRANCH {
+                ip = ip + 2; # skip cond
+                let tgt_t = rex_read_u32(buf, ip);
+                let tgt_f = rex_read_u32(buf, ip + 4);
+                ip = ip + 8;
+                let found_t = 0;
+                let found_f = 0;
+                let ii = 0;
+                while ii < inst_cnt {
+                    let istart = get_qword(inst_starts, ii);
+                    if istart == tgt_t { found_t = 1; }
+                    if istart == tgt_f { found_f = 1; }
+                    ii = ii + 1;
+                }
+                if (found_t == 0) | (found_f == 0) { return REX_ERR_BAD_BRANCH_TGT; }
+            }
+            if op == REX_OP_CALL {
+                let arg_cnt = rex_read_u16(buf, ip + 6);
+                ip = ip + 8 + (arg_cnt * 2);
+            }
+            if op == REX_OP_RETURN { ip = ip + 2; }
+            if op == REX_OP_TRAP { ip = ip + 2; }
+            if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) { ip = ip + 8; }
+            if (op == REX_OP_STORE_64) | (op == REX_OP_STORE_8) { ip = ip + 8; }
+            if (op == REX_OP_ALLOC_MEM) | (op == REX_OP_ADDR_LOCAL) { ip = ip + 6; }
+        }
+
+        cp = body_end;
+        fi = fi + 1;
+    }
+
+    # 5. Validate Exports Section
+    let exp_off = get_qword(sec_tbl, REX_SEC_EXPORTS * 2 + 0);
+    let exp_len = get_qword(sec_tbl, REX_SEC_EXPORTS * 2 + 1);
+    if exp_len < 4 {
+        return REX_ERR_TRUNCATED;
+    }
+    let exp_cnt = rex_read_u32(buf, exp_off);
+    if exp_cnt == 0 {
+        return REX_ERR_NO_MAIN_EXPORT;
+    }
+
+    let ep = exp_off + 4;
+    let exp_end = exp_off + exp_len;
+    let found_main = 0;
+    let ei = 0;
+    while ei < exp_cnt {
+        if ep + 12 > exp_end {
+            return REX_ERR_TRUNCATED;
+        }
+        let nhash = rex_read_u64(buf, ep);
+        let fidx = rex_read_u32(buf, ep + 8);
+        ep = ep + 12;
+
+        if fidx >= func_cnt {
+            return REX_ERR_INVALID_FUNC_IDX;
+        }
+        # FN_HASH_MAIN = 6385467242
+        if nhash == 6385467242 {
+            found_main = 1;
+        }
+        ei = ei + 1;
+    }
+
+    if found_main == 0 {
+        return REX_ERR_NO_MAIN_EXPORT;
+    }
+
+    return REX_OK;
+}

@@ -1,0 +1,342 @@
+# ==============================================================================
+# Rubix Control Style (RCS) Native Bake Engine (rubix/rcs/bake.bix)
+# Direct in-memory mutation of WebNode/WebStyle structs from parsed RCS rules.
+# Zero intermediate CSS. Zero serialization.
+# ==============================================================================
+
+use rcs.ast;
+use rcs.tokens;
+use rcs.motion;
+use rcs.resolver;
+use webbix.ir.style;
+
+# --- Stamp a single property:value pair directly into a WebStyle struct ---
+fn rcs_stamp_declaration(style: *WebStyle, prop: str, val: str): void {
+    # Resolve alias -> canonical property
+    let canon_prop = rcs_map_property(prop);
+    # Resolve alias -> canonical value (theme tokens, named sizes, etc.)
+    let resolved = rcs_resolve_value(canon_prop, val);
+
+    # --- Layout ---
+    if str_eq(canon_prop, "display") | str_eq(canon_prop, "layout") {
+        style.layout = rcs_to_web_layout(resolved);
+        return;
+    }
+
+    # --- Spacing ---
+    if str_eq(canon_prop, "padding") {
+        # Parse numeric value from dimension string
+        style.padding_x = rcs_parse_int(resolved);
+        style.padding_y = rcs_parse_int(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "gap") {
+        style.gap = rcs_parse_int(resolved);
+        return;
+    }
+
+    # --- Colors ---
+    if str_eq(canon_prop, "background") {
+        style.bg_color = rcs_to_web_color(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "color") {
+        style.text_color = rcs_to_web_color(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "border-color") {
+        style.border_color = rcs_to_web_color(resolved);
+        return;
+    }
+
+    # --- Typography ---
+    if str_eq(canon_prop, "font-size") {
+        style.text_size = rcs_to_web_text_size(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "font-weight") {
+        style.weight = rcs_to_web_weight(resolved);
+        return;
+    }
+
+    # --- Shape ---
+    if str_eq(canon_prop, "border-radius") {
+        style.radius = rcs_to_web_radius(resolved);
+        return;
+    }
+    if str_eq(canon_prop, "box-shadow") {
+        style.shadow = rcs_to_web_shadow(resolved);
+        return;
+    }
+
+    # --- Dimensions ---
+    if str_eq(canon_prop, "width") {
+        # Width stored as raw integer for IR
+        return;
+    }
+    if str_eq(canon_prop, "height") {
+        # Height stored as raw integer for IR
+        return;
+    }
+
+    # --- Grid ---
+    if str_eq(canon_prop, "columns") {
+        style.columns = rcs_parse_int(resolved);
+        return;
+    }
+}
+
+# --- Stamp layout shorthand helpers ---
+fn rcs_stamp_layout_helper(style: *WebStyle, keyword: str): void {
+    if str_eq(keyword, "center") {
+        style.align = WebAlign.Center;
+        style.justify = WebAlign.Center;
+        return;
+    }
+    if str_eq(keyword, "row") {
+        style.layout = WebLayout.Row;
+        return;
+    }
+    if str_eq(keyword, "col") {
+        style.layout = WebLayout.Column;
+        return;
+    }
+    if str_eq(keyword, "grid") {
+        style.layout = WebLayout.Grid;
+        return;
+    }
+}
+
+# --- Stamp a motion declaration into the WebStyle animation slot ---
+fn rcs_stamp_motion(style: *WebStyle, verb: str, direction: str): void {
+    style.animation = rcs_to_web_animation(verb, direction);
+}
+
+# --- Parse leading integer from a value string (e.g. "12px" → 12) ---
+fn rcs_parse_int(val: str): i64 {
+    let len = string_length(val);
+    let result = 0;
+    let i = 0;
+    let neg = false;
+
+    if (i < len) & ((val[i] as i64) == 45) {
+        neg = true;
+        i = i + 1;
+    }
+
+    while (i < len) & ((val[i] as i64) >= 48) & ((val[i] as i64) <= 57) {
+        result = result * 10 + ((val[i] as i64) - 48);
+        i = i + 1;
+    }
+
+    if neg { return 0 - result; }
+    return result;
+}
+
+# --- Full bake: parse an RCS source and apply all rules to a style struct ---
+fn rcs_bake_style(src: str, style: *WebStyle): i64 {
+    let max_rules = 64;
+    let rules = alloc_buffer(32768) as *RcsRule;
+
+    let rule_count = rcs_parse(src, rules, max_rules);
+
+    # Sort by specificity so lower-specificity rules apply first (cascade)
+    rcs_sort_by_specificity(rules, rule_count);
+
+    # Re-parse for per-rule declaration stamping
+    # Since parser stores counts but not the actual prop/val pairs,
+    # we re-tokenize and walk to stamp declarations
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+
+    let t_idx = 0;
+    while t_idx < tok_count {
+        # Collect full selector (handles pseudo-selectors like card.photo:hover, :root, classes, IDs)
+        let sel_start = tokens[t_idx].start_offset;
+        let sel_end = sel_start;
+        let has_when = false;
+
+        while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) & (has_when == false) {
+            let tok_str = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(tok_str, "when") {
+                has_when = true;
+            } else {
+                sel_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                t_idx = t_idx + 1;
+            }
+        }
+
+        let sel = string_trim(string_slice(src, sel_start, sel_end - sel_start));
+        if string_length(sel) == 0 {
+            if t_idx < tok_count { t_idx = t_idx + 1; }
+            continue;
+        }
+
+        # Skip 'when' condition
+        if has_when {
+            t_idx = t_idx + 1;
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                t_idx = t_idx + 1;
+            }
+        }
+
+        # Expect '{'
+        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+            t_idx = t_idx + 1;
+
+            # Walk the body
+            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                let first = rcs_token_text(src, &tokens[t_idx]);
+
+                # Layout helpers
+                if str_eq(first, "center") | str_eq(first, "row") | str_eq(first, "col") | str_eq(first, "grid") {
+                    rcs_stamp_layout_helper(style, first);
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Motion verbs
+                if rcs_is_motion_verb(first) {
+                    let verb = first;
+                    let dir = "";
+                    t_idx = t_idx + 1;
+                    # Collect direction if next token isn't 'on' or ';' or '}'
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Ident) {
+                        let next_word = rcs_token_text(src, &tokens[t_idx]);
+                        if !str_eq(next_word, "on") & !str_eq(next_word, "forever") & !rcs_is_trigger_word(next_word) {
+                            dir = next_word;
+                        }
+                    }
+                    rcs_stamp_motion(style, verb, dir);
+                    # Consume rest of motion statement
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # 3D helpers (tilt, depth)
+                if str_eq(first, "tilt") | str_eq(first, "depth") {
+                    t_idx = t_idx + 1;
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Number) {
+                        t_idx = t_idx + 1;
+                    }
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                    continue;
+                }
+
+                # Standard declaration: prop: value;
+                let prop = first;
+                t_idx = t_idx + 1;
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                    t_idx = t_idx + 1;
+                    let val_start = -1;
+                    let val_end = -1;
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        if val_start < 0 {
+                            val_start = tokens[t_idx].start_offset;
+                        }
+                        val_end = tokens[t_idx].start_offset + tokens[t_idx].length;
+                        t_idx = t_idx + 1;
+                    }
+                    let val_str = "";
+                    if val_start >= 0 {
+                        val_str = string_trim(string_slice(src, val_start, val_end - val_start));
+                    }
+                    rcs_stamp_declaration(style, prop, val_str);
+                    if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) {
+                        t_idx = t_idx + 1;
+                    }
+                } else {
+                    # No colon — skip
+                    t_idx = t_idx + 1;
+                }
+            }
+
+            # Consume '}'
+            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.RBrace) {
+                t_idx = t_idx + 1;
+            }
+        }
+    }
+
+    free_buffer(tokens as ptr, 32768);
+    free_buffer(rules as ptr, 32768);
+    return rule_count;
+}
+
+# --- Bake a single rule into a node's style (for selective application) ---
+fn rcs_bake_rule_into_style(src: str, style: *WebStyle, selector: str): void {
+    let max_tok = 2048;
+    let tokens = alloc_buffer(32768) as *RcsToken;
+    let tok_count = rcs_tokenize(src, tokens, max_tok);
+    let t_idx = 0;
+
+    while t_idx < tok_count {
+        if tokens[t_idx].kind == RcsTokenKind.Ident {
+            let sel = rcs_token_text(src, &tokens[t_idx]);
+            if str_eq(sel, selector) {
+                t_idx = t_idx + 1;
+                # Skip 'when'
+                if (t_idx < tok_count) & (str_eq(rcs_token_text(src, &tokens[t_idx]), "when")) {
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.LBrace) {
+                        t_idx = t_idx + 1;
+                    }
+                }
+                # Enter rule body
+                if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.LBrace) {
+                    t_idx = t_idx + 1;
+                    while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                        let first = rcs_token_text(src, &tokens[t_idx]);
+                        # Layout helpers
+                        if str_eq(first, "center") | str_eq(first, "row") | str_eq(first, "col") | str_eq(first, "grid") {
+                            rcs_stamp_layout_helper(style, first);
+                            t_idx = t_idx + 1;
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                            continue;
+                        }
+                        # Motion
+                        if rcs_is_motion_verb(first) {
+                            let dir = "";
+                            t_idx = t_idx + 1;
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Ident) {
+                                let nw = rcs_token_text(src, &tokens[t_idx]);
+                                if !str_eq(nw, "on") & !rcs_is_trigger_word(nw) { dir = nw; }
+                            }
+                            rcs_stamp_motion(style, first, dir);
+                            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) { t_idx = t_idx + 1; }
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                            continue;
+                        }
+                        # Declaration
+                        let prop = first;
+                        t_idx = t_idx + 1;
+                        if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Colon) {
+                            t_idx = t_idx + 1;
+                            let val_str = "";
+                            while (t_idx < tok_count) & (tokens[t_idx].kind != RcsTokenKind.Semicolon) & (tokens[t_idx].kind != RcsTokenKind.RBrace) {
+                                let v = rcs_token_text(src, &tokens[t_idx]);
+                                if string_length(val_str) > 0 { val_str = val_str + " " + v; } else { val_str = v; }
+                                t_idx = t_idx + 1;
+                            }
+                            rcs_stamp_declaration(style, prop, val_str);
+                            if (t_idx < tok_count) & (tokens[t_idx].kind == RcsTokenKind.Semicolon) { t_idx = t_idx + 1; }
+                        }
+                    }
+                }
+            }
+        }
+        t_idx = t_idx + 1;
+    }
+
+    free_buffer(tokens as ptr, 32768);
+}

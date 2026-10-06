@@ -1,0 +1,24 @@
+fn main(): Integer {
+    let p = alloc(128)
+    let fake = p + 16
+    
+    # Write fake capacity at p + 0 = 1000000
+    set_i64_at(p, 0, 1000000)
+    # Write fake magic at p + 8 = 0x5255424958414C43 ("RUBIXALC")
+    set_i64_at(p, 8, 5932720966911216707)
+    
+    print "Step 1: fake magic written"
+    # Now fake is p + 16.
+    # What does set_byte_at(fake, 0, 65) do?
+    set_byte_at(fake, 0, 65)
+    print "Step 2: set_byte_at(fake, 0) succeeded!"
+    
+    # Now what if we write at offset 500?
+    set_byte_at(fake, 500, 66)
+    print "Step 3: set_byte_at(fake, 500) succeeded!"
+    
+    let val = get_byte_at(fake, 500)
+    print "Read val:"
+    print val
+    0
+}

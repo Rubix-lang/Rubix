@@ -1,0 +1,106 @@
+# constants.bix - target architecture IDs, ELF machine types, and compiler sentinels
+
+# Target architecture identifiers
+let TARGET_X86_64    = 1;
+let TARGET_ARM64     = 2;
+let TARGET_RISCV64   = 3;
+let TARGET_REX       = 4;
+let TARGET_WINDOWS   = 5;
+let TARGET_MACOS     = 6;
+let TARGET_WASM      = 7;
+let TARGET_SYNTHETIC = 99;
+
+# ELF architecture machine types (e_machine)
+let EM_X86_64  = 62;
+let EM_AARCH64 = 183;
+let EM_RISCV   = 243;
+
+# ELF layout and virtual memory base
+let ELF_HEADER_SIZE        = 64;
+let ELF_PHDR_SIZE          = 56;
+let ELF_BASE_VADDR         = 4194304; # 0x400000 load base for 64-bit Linux executables
+let ELF_HEADERS_TOTAL_SIZE = 120;     # 64 + 56 aligned to text load offset
+
+# Precomputed hash of the "main" function identifier (hash_token("main", 4))
+let FN_HASH_MAIN = 6385467242;
+
+# Maps x86 SETcc opcode byte (0x90..0x9F / 144..159) to Jcc opcode byte (0x80..0x8F / 128..143):
+# e.g., SETNE (149) - 16 = JNE (133)
+let JCC_FROM_SETCC_OFFSET = 16;
+
+# Lookup sentinel for missing symbols or enum variants
+let SENTINEL_NOT_FOUND   = -999999999;
+
+# REX VM instruction cycle ceiling
+let REX_TRAP_CYCLE_LIMIT = -999;
+
+# Compiler working buffer capacities and table offsets (mirrored from memory_layout.bix)
+let COMPILER_TBL_BUF_SIZE        = 33554432;
+let COMPILER_UIR_BUF_SIZE        = 2097152;
+let COMPILER_MIR_BUF_SIZE        = 2097152;
+let COMPILER_CODE_BUF_SIZE       = 2097152;
+let COMPILER_AST_ARENA_SIZE      = 4194304;
+let COMPILER_STATE_BUF_SIZE      = 4096;
+let COMPILER_TOK_BUF_SIZE        = 4096;
+
+let TBL_CONST_COUNT_QWORD_IDX    = 11250;
+let TBL_CONST_BASE_OFFSET         = 90008;
+let TBL_CONST_ENTRY_SIZE          = 16;
+let TBL_CONST_MAX_CAPACITY        = 4096;
+
+let TBL_STRUCT_COUNT_QWORD_IDX    = 17500;
+let TBL_STRUCT_BASE_OFFSET        = 140008;
+let TBL_STRUCT_ENTRY_SIZE         = 800;
+let TBL_STRUCT_MAX_CAPACITY       = 64;
+
+let TBL_ENUM_COUNT_QWORD_IDX      = 25000;
+let TBL_ENUM_BASE_OFFSET          = 200008;
+let TBL_ENUM_ENTRY_SIZE           = 1600;
+let TBL_ENUM_MAX_CAPACITY         = 64;
+
+let TBL_VAR_USAGE_QWORD_IDX       = 50000;
+let TBL_VAR_USAGE_NEXT_IDX        = 62500;
+let TBL_VAR_USAGE_BASE_OFFSET     = 400000;
+let TBL_VAR_USAGE_NEXT_OFFSET     = 500000;
+let TBL_VAR_USAGE_MAX_WORDS       = 8000;
+
+let TBL_EPILOGUE_COUNT_QWORD_IDX  = 77500;
+let TBL_EPILOGUE_BASE_OFFSET      = 620008;
+let TBL_EPILOGUE_ENTRY_SIZE       = 8;
+let TBL_EPILOGUE_MAX_CAPACITY     = 4096;
+
+let TBL_VAR_COUNT_QWORD_IDX       = 250000;
+let TBL_VAR_BASE_OFFSET           = 2000008;
+let TBL_VAR_ENTRY_SIZE            = 48;
+let TBL_VAR_MAX_CAPACITY          = 4096;
+
+let TBL_PATCH_COUNT_QWORD_IDX     = 500000;
+let TBL_PATCH_BASE_OFFSET         = 4000008;
+let TBL_PATCH_ENTRY_SIZE          = 16;
+let TBL_PATCH_MAX_CAPACITY        = 65536;
+
+let TBL_FUNC_COUNT_QWORD_IDX      = 1000000;
+let TBL_FUNC_BASE_OFFSET          = 8000008;
+let TBL_FUNC_ENTRY_SIZE           = 192;
+let TBL_FUNC_MAX_CAPACITY         = 8192;
+
+let TBL_FUNC_EXT_PARAMS_OFFSET    = 12000000;
+let TBL_FUNC_EXT_ENTRY_SIZE       = 160;
+
+let TBL_FUNC_PARAM_ARRLEN_OFFSET  = 15000000;
+let TBL_FUNC_ARRLEN_ENTRY_SIZE    = 128;
+
+let TBL_GEN_FUNC_COUNT_QWORD_IDX  = 33750;
+let TBL_GEN_FUNC_BASE_OFFSET      = 270008;
+let TBL_GEN_FUNC_ENTRY_SIZE       = 128;
+let TBL_GEN_FUNC_MAX_CAPACITY     = 64;
+
+let TBL_GEN_INST_COUNT_QWORD_IDX  = 35000;
+let TBL_GEN_INST_BASE_OFFSET      = 280008;
+let TBL_GEN_INST_ENTRY_SIZE       = 64;
+let TBL_GEN_INST_MAX_CAPACITY     = 128;
+
+let TBL_GEN_BIND_COUNT_QWORD_IDX  = 36250;
+let TBL_GEN_BIND_BASE_OFFSET      = 290008;
+let TBL_GEN_BIND_ENTRY_SIZE       = 16;
+let TBL_GEN_BIND_MAX_CAPACITY     = 32;

@@ -1,0 +1,971 @@
+# uir_bridge.bix - backend lowering Universal IR (UIR) to x86-64 machine code
+
+
+# Note: dependencies (token, emitter, uir, regalloc) are imported centrally by main.bix
+
+# Callee-saved physical registers available for vreg allocation (x86-64 ABI):
+# rbx=3, r12=12, r13=13, r14=14, r15=15 (pool size = 5)
+# These are never clobbered by the bridge's internal instruction sequences.
+
+# Bridge-aware load: emit code that puts vreg into rax.
+# If vreg has a physical register (rbx=3, r12=12, r13=13, r14=14, r15=15), emit mov rax, reg.
+# Otherwise load from stack slot.
+fn uir_bridge_load_vreg(buf: i64, l: i64, vreg: i64, type_id: i64, intervals: i64): i64 {
+    if (vreg >= 0) & (vreg < 64) {
+        let phys = get_qword(intervals + (vreg * 48), 3);
+        if phys > 0 {
+            if phys == 3 { # rbx: 48 8B C3
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 195);
+                return l;
+            }
+            # r12..r15: 49 8B C4/C5/C6/C7
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 139);
+            if phys == 12 { l = emit_byte(buf, l, 196); }
+            if phys == 13 { l = emit_byte(buf, l, 197); }
+            if phys == 14 { l = emit_byte(buf, l, 198); }
+            if phys == 15 { l = emit_byte(buf, l, 199); }
+            return l;
+        }
+    }
+    return emit_load_slot_typed(buf, l, (vreg + 1) * 8, type_id);
+}
+
+# Bridge-aware store: emit code that puts rax into vreg.
+# If vreg has a physical register, emit mov reg, rax. Otherwise store to stack slot.
+fn uir_bridge_store_vreg(buf: i64, l: i64, vreg: i64, type_id: i64, intervals: i64): i64 {
+    if (vreg >= 0) & (vreg < 64) {
+        let phys = get_qword(intervals + (vreg * 48), 3);
+        if phys > 0 {
+            if phys == 3 { # rbx: 48 89 C3
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 195);
+                return l;
+            }
+            # r12..r15: 49 89 C4/C5/C6/C7
+            l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137);
+            if phys == 12 { l = emit_byte(buf, l, 196); }
+            if phys == 13 { l = emit_byte(buf, l, 197); }
+            if phys == 14 { l = emit_byte(buf, l, 198); }
+            if phys == 15 { l = emit_byte(buf, l, 199); }
+            return l;
+        }
+    }
+    return emit_store_slot_typed(buf, l, (vreg + 1) * 8, type_id);
+}
+
+fn uir_bridge_load_cached(buf: i64, l: i64, vreg: i64, type_id: i64, intervals: i64, cached_vreg: i64, cached_type: i64): i64 {
+    if (vreg >= 0) & (vreg == cached_vreg) & (type_id == cached_type) {
+        return l;
+    }
+    return uir_bridge_load_vreg(buf, l, vreg, type_id, intervals);
+}
+
+# ------------------------------------------------------------------------------
+# uir_bridge_compile_function_with_patches:
+# Lowers a single UIR function into machine bytes in code_buf starting at start_len.
+# Records function calls into prog_call_patches if provided.
+# Returns new code length.
+# ------------------------------------------------------------------------------
+fn uir_bridge_compile_function_with_patches(uir_buf: i64, start_node: i64, end_node: i64, code_buf: i64, start_len: i64, prog_call_patches: i64): i64 {
+    let l = start_len;
+
+    # Allocate label table & patch table (scratch memory)
+    let label_tbl = sys_mmap_page();
+    let patch_tbl = sys_mmap_page();
+    # Initialize label offsets to -1 (up to 64 labels per function)
+    let li = 0;
+    while li < 64 {
+        set_qword(label_tbl, li, -1);
+        set_qword(patch_tbl, li * 4 + 0, 0); # patch count for label li
+        li = li + 1;
+    }
+    # Count parameters from UIR_FUNCTION_START
+    let param_count = get_qword(uir_node_addr(uir_buf, start_node), 5);
+
+    # Find active slots, calls, and max_vreg
+    let max_vreg = -1;
+    let max_call_args = 0;
+    let live_let_count = 0;
+    let ni = start_node;
+    while ni < end_node {
+        let n_addr = uir_node_addr(uir_buf, ni);
+        let op = get_qword(n_addr, 0);
+        let dst = get_qword(n_addr, 4);
+        let s1 = get_qword(n_addr, 5);
+        let s2 = get_qword(n_addr, 6);
+        let fl = get_qword(n_addr, 2);
+
+        if op != 0 {
+            if op == 2 { # UIR_MOVE (live local variable)
+                live_let_count = live_let_count + 1;
+            }
+            if op == UIR_CALL {
+                if s2 > max_call_args { max_call_args = s2; }
+                if dst > max_vreg { max_vreg = dst; }
+            } else {
+                if op == UIR_BRANCH {
+                    if s1 > max_vreg { max_vreg = s1; }
+                } else {
+                    if op == 58 { # ARG
+                        if (fl & 1) == 0 {
+                            if s1 > max_vreg { max_vreg = s1; }
+                        }
+                    } else {
+                        if op == UIR_RETURN {
+                            if (fl & 1) == 0 {
+                                if (s1 >= 0) & (s1 > max_vreg) { max_vreg = s1; }
+                            }
+                        } else {
+                            # Skip structural ops whose dst/s1/s2 are NOT virtual registers:
+                            # FUNCTION_START(50), FUNCTION_END(51), LABEL(53), JUMP(54).
+                            let is_struct_op = 0;
+                            if op == 50 { is_struct_op = 1; }
+                            if op == 51 { is_struct_op = 1; }
+                            if op == 53 { is_struct_op = 1; }
+                            if op == 54 { is_struct_op = 1; }
+                            if is_struct_op == 0 {
+                                if dst > max_vreg { max_vreg = dst; }
+                                if (fl & 1) == 0 {
+                                    if (op != 1) & (s1 > max_vreg) { max_vreg = s1; }
+                                }
+                                if (fl & 2) == 0 {
+                                    if s2 > max_vreg { max_vreg = s2; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ni = ni + 1;
+    }
+
+    # -------------------------------------------------------------------------
+    # Linear-scan register allocation over {rbx=3, r12=12, r13=13, r14=14, r15=15}
+    # -------------------------------------------------------------------------
+    let intervals = sys_mmap_page();  # 64 * 48 = 3072 bytes
+    let pool_regs = sys_mmap_page();  # allocation pool: 5 callee-saved regs
+    set_qword(pool_regs, 0, 3);   # rbx
+    set_qword(pool_regs, 1, 12);  # r12
+    set_qword(pool_regs, 2, 13);  # r13
+    set_qword(pool_regs, 3, 14);  # r14
+    set_qword(pool_regs, 4, 15);  # r15
+
+    let num_vregs = max_vreg + 1;
+    if num_vregs > 64 { num_vregs = 64; }
+    if num_vregs > 0 {
+        # Initialize intervals (up to 64 virtual registers)
+        let vi = 0;
+        while vi < 64 {
+            let base = intervals + (vi * 48);
+            set_qword(base, 0, 0);      # defined = 0
+            set_qword(base, 1, 999999); # start_node
+            set_qword(base, 2, -1);     # end_node
+            set_qword(base, 3, -1);     # assigned_phys_reg = -1
+            set_qword(base, 4, 0);      # spill_slot
+            set_qword(base, 5, 0);      # spill_cost
+            vi = vi + 1;
+        }
+
+        # 1. Compute liveness intervals
+        let ni = start_node;
+        while ni < end_node {
+            let addr = uir_node_addr(uir_buf, ni);
+            let op = get_qword(addr, 0);
+            let dst = get_qword(addr, 4);
+            let s1 = get_qword(addr, 5);
+            let s2 = get_qword(addr, 6);
+            let fl = get_qword(addr, 2);
+            let extra = get_qword(addr, 7);
+            let imm1 = fl & 1;
+            let imm2 = (fl >> 1) & 1;
+
+            let weight = 1;
+            if extra == 1 { weight = 10; }
+            if extra >= 2 { weight = 100; }
+
+            if (op != 50) & (op != 51) & (op != 53) & (op != 54) & (op != 55) {
+                if (dst >= 0) & (dst < 64) {
+                    let base_d = intervals + (dst * 48);
+                    set_qword(base_d, 0, 1);
+                    if ni < get_qword(base_d, 1) { set_qword(base_d, 1, ni); }
+                    if ni > get_qword(base_d, 2) { set_qword(base_d, 2, ni); }
+                }
+            }
+
+            let has_s1 = 0;
+            if (op == 2) | (op == 3) { has_s1 = 1; }
+            if (op >= 10) & (op <= 15) { has_s1 = 1; }
+            if (op >= 20) & (op <= 25) { has_s1 = 1; }
+            if (op >= 30) & (op <= 35) { has_s1 = 1; }
+            if (op >= 41) & (op <= 44) { has_s1 = 1; }
+            if (op == 55) | (op == 57) | (op == 58) { has_s1 = 1; }
+
+            if (has_s1 == 1) & (imm1 == 0) & (s1 >= 0) & (s1 < 64) {
+                let base_s1 = intervals + (s1 * 48);
+                if ni < get_qword(base_s1, 1) { set_qword(base_s1, 1, ni); }
+                if ni > get_qword(base_s1, 2) { set_qword(base_s1, 2, ni); }
+                set_qword(base_s1, 5, get_qword(base_s1, 5) + weight);
+            }
+
+            let has_s2 = 0;
+            if (op >= 10) & (op <= 14) { has_s2 = 1; }
+            if (op >= 20) & (op <= 22) { has_s2 = 1; }
+            if (op == 24) | (op == 25) { has_s2 = 1; }
+            if (op >= 30) & (op <= 35) { has_s2 = 1; }
+            if (op == 43) | (op == 44) { has_s2 = 1; }
+
+            if (has_s2 == 1) & (imm2 == 0) & (s2 >= 0) & (s2 < 64) {
+                let base_s2 = intervals + (s2 * 48);
+                if ni < get_qword(base_s2, 1) { set_qword(base_s2, 1, ni); }
+                if ni > get_qword(base_s2, 2) { set_qword(base_s2, 2, ni); }
+                set_qword(base_s2, 5, get_qword(base_s2, 5) + weight);
+            }
+
+            ni = ni + 1;
+        }
+
+        # 2. Pin any vreg whose address is taken by op 41 (ADDR_OF) to stack
+        let chk_i = start_node;
+        while chk_i < end_node {
+            let chk_addr = uir_node_addr(uir_buf, chk_i);
+            if get_qword(chk_addr, 0) == 41 {
+                let ao_s1 = get_qword(chk_addr, 5);
+                if (ao_s1 >= 0) & (ao_s1 < 64) {
+                    set_qword(intervals + (ao_s1 * 48), 0, 0); # defined = 0
+                }
+            }
+            chk_i = chk_i + 1;
+        }
+
+        # 3. Linear Scan Register Allocation
+        let active = sys_mmap_page();
+        let active_count = 0;
+        let in_use_mask = 0;
+
+        let vreg_i = 0;
+        while vreg_i < num_vregs {
+            let base_v = intervals + (vreg_i * 48);
+            if get_qword(base_v, 0) == 1 {
+                let start = get_qword(base_v, 1);
+                let end = get_qword(base_v, 2);
+                let cur_cost = get_qword(base_v, 5);
+
+                # Expire old intervals
+                let ai = 0;
+                while ai < active_count {
+                    let act_end = get_qword(active, ai * 3 + 1);
+                    if act_end < start {
+                        let freed_reg = get_qword(active, ai * 3 + 2);
+                        let freed_bit = 1 << freed_reg;
+                        if ((in_use_mask >> freed_reg) & 1) == 1 {
+                            in_use_mask = in_use_mask - freed_bit;
+                        }
+                        let shift_i = ai;
+                        while shift_i < (active_count - 1) {
+                            set_qword(active, shift_i * 3 + 0, get_qword(active, (shift_i + 1) * 3 + 0));
+                            set_qword(active, shift_i * 3 + 1, get_qword(active, (shift_i + 1) * 3 + 1));
+                            set_qword(active, shift_i * 3 + 2, get_qword(active, (shift_i + 1) * 3 + 2));
+                            shift_i = shift_i + 1;
+                        }
+                        active_count = active_count - 1;
+                    } else {
+                        ai = ai + 1;
+                    }
+                }
+
+                # Find first free register from pool (size = 5)
+                let assigned_reg = -1;
+                if cur_cost >= 2 {
+                    let pi = 0;
+                    while (pi < 5) & (assigned_reg < 0) {
+                        let cand_reg = get_qword(pool_regs, pi);
+                        if ((in_use_mask >> cand_reg) & 1) == 0 {
+                            assigned_reg = cand_reg;
+                        }
+                        pi = pi + 1;
+                    }
+                }
+
+                if assigned_reg >= 0 {
+                    set_qword(base_v, 3, assigned_reg);
+                    in_use_mask = in_use_mask | (1 << assigned_reg);
+                    set_qword(active, active_count * 3 + 0, vreg_i);
+                    set_qword(active, active_count * 3 + 1, end);
+                    set_qword(active, active_count * 3 + 2, assigned_reg);
+                    active_count = active_count + 1;
+                } else {
+                    if cur_cost >= 2 {
+                        # Register pressure: spill decision based on loop cost
+                        let min_cost_idx = -1;
+                        let min_cost_val = 999999;
+                        let chk_c = 0;
+                        while chk_c < active_count {
+                            let act_vid = get_qword(active, chk_c * 3 + 0);
+                            let act_cost = get_qword(intervals + (act_vid * 48), 5);
+                            if act_cost < min_cost_val {
+                                min_cost_val = act_cost;
+                                min_cost_idx = chk_c;
+                            }
+                            chk_c = chk_c + 1;
+                        }
+
+                        if (min_cost_idx >= 0) & (cur_cost > min_cost_val) {
+                            let evict_vid = get_qword(active, min_cost_idx * 3 + 0);
+                            let evict_reg = get_qword(active, min_cost_idx * 3 + 2);
+                            set_qword(intervals + (evict_vid * 48), 3, -1);
+                            set_qword(base_v, 3, evict_reg);
+                            set_qword(active, min_cost_idx * 3 + 0, vreg_i);
+                            set_qword(active, min_cost_idx * 3 + 1, end);
+                            set_qword(active, min_cost_idx * 3 + 2, evict_reg);
+                        } else {
+                            set_qword(base_v, 3, -1);
+                        }
+                    } else {
+                        set_qword(base_v, 3, -1);
+                    }
+                }
+            }
+            vreg_i = vreg_i + 1;
+        }
+    }
+
+    # Determine which callee-saved regs are actually assigned (need push/pop)
+    let use_rbx = 0;
+    let use_r12 = 0;
+    let use_r13 = 0;
+    let use_r14 = 0;
+    let use_r15 = 0;
+    let num_callee = 0;
+    if num_vregs > 0 {
+        let vi = 0;
+        while vi < num_vregs {
+            let phys = get_qword(intervals + (vi * 48), 3);
+            if phys == 3 { use_rbx = 1; }
+            if phys == 12 { use_r12 = 1; }
+            if phys == 13 { use_r13 = 1; }
+            if phys == 14 { use_r14 = 1; }
+            if phys == 15 { use_r15 = 1; }
+            vi = vi + 1;
+        }
+        num_callee = use_rbx + use_r12 + use_r13 + use_r14 + use_r15;
+    }
+
+    let frame_bytes = 0;
+    if max_vreg >= 0 {
+        frame_bytes = (max_vreg + 2 + max_call_args) * 8;
+    }
+    let frame_size = 0;
+    if frame_bytes > 0 {
+        frame_size = ((frame_bytes + 15) / 16) * 16;
+        if (num_callee % 2) == 1 {
+            frame_size = frame_size + 8;
+        }
+    } else {
+        if (num_callee % 2) == 1 {
+            frame_size = 8;
+        }
+    }
+
+    # Prologue: push callee-saved regs FIRST (in allocation order), then rbp frame setup
+    # Must mirror epilogue order (pop in reverse).
+    if use_rbx == 1 { l = emit_byte(code_buf, l, 83); }
+    if use_r12 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 84); }
+    if use_r13 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 85); }
+    if use_r14 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 86); }
+    if use_r15 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 87); }
+    l = emit_byte(code_buf, l, 85);
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 229);
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 129); l = emit_byte(code_buf, l, 236);
+    l = emit_disp32(code_buf, l, frame_size);
+
+    # Epilogue patch list
+    let epilogue_patch_count = 0;
+    let epilogue_patches = sys_mmap_page();
+
+    let fused_cmp_jcc = -1;
+    let cached_rax_vreg = -1;
+    let cached_rax_type = -1;
+
+    # Lower each UIR instruction
+    let idx = start_node;
+    while idx < end_node {
+        let addr = uir_node_addr(uir_buf, idx);
+        let op = get_qword(addr, 0);
+        let type_id = get_qword(addr, 1);
+        let fl = get_qword(addr, 2);
+        let dst = get_qword(addr, 4);
+        let s1 = get_qword(addr, 5);
+        let s2 = get_qword(addr, 6);
+        let extra = get_qword(addr, 7);
+        let imm1 = fl & 1;
+        let imm2 = (fl >> 1) & 1;
+
+        if op != 55 {
+            fused_cmp_jcc = -1;
+        }
+
+        if op == 52 {
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+            # dst = vreg, s1 = param index (0, 1, 2, ...)
+            let p_slot = (dst + 1) * 8;
+            if s1 < 6 {
+                l = emit_store_param_typed(code_buf, l, s1, p_slot, type_id);
+                let phys_d = -1;
+                if (dst >= 0) & (dst < 64) {
+                    phys_d = get_qword(intervals + (dst * 48), 3);
+                }
+                if phys_d > 0 {
+                    l = emit_load_slot_typed(code_buf, l, p_slot, type_id);
+                    l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+                }
+            } else {
+                let src_disp = 16 + (num_callee * 8) + ((s1 - 6) * 8);
+                l = emit_byte(code_buf, l, 72);
+                l = emit_byte(code_buf, l, 139);
+                if src_disp <= 127 {
+                    l = emit_byte(code_buf, l, 69);
+                    l = emit_byte(code_buf, l, src_disp);
+                } else {
+                    l = emit_byte(code_buf, l, 133);
+                    l = emit_disp32(code_buf, l, src_disp);
+                }
+                l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            }
+        }
+
+        if op == UIR_CONST {
+            l = emit_mov_imm64(code_buf, l, 0, s1);
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == UIR_MOVE {
+            l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == 3 {
+            l = uir_bridge_load_cached(code_buf, l, s1, extra, intervals, cached_rax_vreg, cached_rax_type);
+            l = emit_cast(code_buf, l, extra, type_id);
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        # Binary Arithmetic & Bitwise Operations
+        let is_bin_op = 0;
+        let tok_op = 0;
+        if op == UIR_ADD { is_bin_op = 1; tok_op = TOKEN_PLUS; }
+        if op == UIR_SUB { is_bin_op = 1; tok_op = TOKEN_MINUS; }
+        if op == 20 { is_bin_op = 1; tok_op = TOKEN_AMP; }
+        if op == 21  { is_bin_op = 1; tok_op = TOKEN_PIPE; }
+        if op == 22 { is_bin_op = 1; tok_op = TOKEN_CARET; }
+        if op == 24 { is_bin_op = 1; tok_op = TOKEN_SHL; }
+        if op == 25 { is_bin_op = 1; tok_op = TOKEN_SHR; }
+
+        if is_bin_op == 1 {
+            if imm2 == 1 {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                l = emit_bin_op_imm64(code_buf, l, tok_op, s2, type_id);
+            } else {
+                l = uir_bridge_load_cached(code_buf, l, s2, type_id, intervals, cached_rax_vreg, cached_rax_type); # rax = s2
+                l = emit_mov_rcx_rax(code_buf, l);                             # rcx = s2
+                l = uir_bridge_load_vreg(code_buf, l, s1, type_id, intervals); # rax = s1
+                l = emit_bin_op_typed(code_buf, l, tok_op, type_id);           # op rax, rcx
+            }
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == UIR_MUL {
+            if imm2 == 1 {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                let mul_l = emit_mul_by_const(code_buf, l, s2);
+                if mul_l >= 0 {
+                    l = mul_l;
+                } else {
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 105); l = emit_byte(code_buf, l, 192);
+                    l = emit_disp32(code_buf, l, s2);
+                }
+            } else {
+                l = uir_bridge_load_cached(code_buf, l, s2, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                l = emit_mov_rcx_rax(code_buf, l); # rcx = s2
+                l = uir_bridge_load_vreg(code_buf, l, s1, type_id, intervals); # rax = s1
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 247); l = emit_byte(code_buf, l, 233); # imul rcx
+            }
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == UIR_DIV {
+            let did_fast_div = 0;
+            if imm2 == 1 {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                let div_l = emit_div_by_const(code_buf, l, s2);
+                if div_l >= 0 {
+                    l = div_l;
+                    did_fast_div = 1;
+                }
+            }
+            if did_fast_div == 0 {
+                if imm2 == 1 {
+                    l = emit_mov_imm64(code_buf, l, 1, s2); # rcx = s2
+                    l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type); # rax = s1
+                } else {
+                    l = uir_bridge_load_cached(code_buf, l, s2, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                    l = emit_mov_rcx_rax(code_buf, l); # rcx = s2
+                    l = uir_bridge_load_vreg(code_buf, l, s1, type_id, intervals); # rax = s1
+                }
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 153); # cqo
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 247); l = emit_byte(code_buf, l, 249); # idiv rcx
+            }
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == 14 { # UIR_MOD
+            let did_fast_mod = 0;
+            if imm2 == 1 {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                let mod_l = emit_mod_by_const(code_buf, l, s2);
+                if mod_l >= 0 {
+                    l = mod_l;
+                    did_fast_mod = 1;
+                }
+            }
+            if did_fast_mod == 0 {
+                if imm2 == 1 {
+                    l = emit_mov_imm64(code_buf, l, 1, s2); # rcx = s2
+                    l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type); # rax = s1
+                } else {
+                    l = uir_bridge_load_cached(code_buf, l, s2, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                    l = emit_mov_rcx_rax(code_buf, l); # rcx = s2
+                    l = uir_bridge_load_vreg(code_buf, l, s1, type_id, intervals); # rax = s1
+                }
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 153); # cqo
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 247); l = emit_byte(code_buf, l, 249); # idiv rcx
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 208); # mov rax, rdx
+            }
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == 15 {
+            l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+            l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 247); l = emit_byte(code_buf, l, 216); # neg rax
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == 23 {
+            l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+            l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 247); l = emit_byte(code_buf, l, 208); # not rax
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        # Comparisons (producing boolean in dst: 1 or 0)
+        let is_cmp = 0;
+        let setcc_byte = 0;
+        if op == 30 { is_cmp = 1; setcc_byte = 148; } # sete (0F 94)
+        if op == 31 { is_cmp = 1; setcc_byte = 149; } # setne (0F 95)
+        if op == 32 { is_cmp = 1; setcc_byte = 156; } # setl (0F 9C)
+        if op == 33 { is_cmp = 1; setcc_byte = 158; } # setle (0F 9E)
+        if op == 34 { is_cmp = 1; setcc_byte = 159; } # setg (0F 9F)
+        if op == 35 { is_cmp = 1; setcc_byte = 157; } # setge (0F 9D)
+
+        if is_cmp == 1 {
+            let fold_branch = 0;
+            if idx + 1 < end_node {
+                let next_addr = uir_node_addr(uir_buf, idx + 1);
+                if (get_qword(next_addr, 0) == 55) & (get_qword(next_addr, 5) == dst) {
+                    if (dst >= 0) & (dst < 64) {
+                        if get_qword(intervals + (dst * 48), 2) == idx + 1 {
+                            fold_branch = 1;
+                        }
+                    }
+                }
+            }
+
+            if imm2 == 1 {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 61);
+                l = emit_disp32(code_buf, l, s2);
+            } else {
+                l = uir_bridge_load_cached(code_buf, l, s2, type_id, intervals, cached_rax_vreg, cached_rax_type); # rax = s2
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 193); # mov rcx, rax
+                l = uir_bridge_load_vreg(code_buf, l, s1, type_id, intervals); # rax = s1
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 57); l = emit_byte(code_buf, l, 200); # cmp rax, rcx
+            }
+
+            if fold_branch == 1 {
+                # JCC_FROM_SETCC_OFFSET (16) maps x86 SETcc (0x90..0x9F) to Jcc (0x80..0x8F)
+                fused_cmp_jcc = setcc_byte - JCC_FROM_SETCC_OFFSET;
+                cached_rax_vreg = -1;
+                cached_rax_type = -1;
+            } else {
+                l = emit_byte(code_buf, l, 15); l = emit_byte(code_buf, l, setcc_byte); l = emit_byte(code_buf, l, 192);
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 15); l = emit_byte(code_buf, l, 182); l = emit_byte(code_buf, l, 192);
+                l = uir_bridge_store_vreg(code_buf, l, dst, TYPE_BOOL, intervals);
+                cached_rax_vreg = dst;
+                cached_rax_type = TYPE_BOOL;
+            }
+        }
+
+        # Memory Operations
+        if op == 41 {
+            let slot_s1 = (s1 + 1) * 8;
+            l = emit_lea_slot(code_buf, l, slot_s1);
+            l = uir_bridge_store_vreg(code_buf, l, dst, TYPE_PTR, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = TYPE_PTR;
+        }
+
+        if op == UIR_LOAD {
+            l = uir_bridge_load_cached(code_buf, l, s1, TYPE_PTR, intervals, cached_rax_vreg, cached_rax_type);
+            l = emit_field_load_typed(code_buf, l, extra, type_id);
+            l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+            cached_rax_vreg = dst;
+            cached_rax_type = type_id;
+        }
+
+        if op == UIR_STORE {
+            l = uir_bridge_load_cached(code_buf, l, s1, TYPE_PTR, intervals, cached_rax_vreg, cached_rax_type);
+            l = emit_mov_rcx_rax(code_buf, l);
+            if imm2 == 1 {
+                l = emit_mov_imm64(code_buf, l, 0, s2);
+            } else {
+                l = uir_bridge_load_vreg(code_buf, l, s2, type_id, intervals);
+            }
+            l = emit_field_store_typed(code_buf, l, extra, type_id);
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+        }
+
+        # Function Call Argument & Call Invocation
+        if op == 58 {
+            let arg_idx = dst;
+            let call_slot = (max_vreg + 2 + arg_idx) * 8;
+            if imm1 == 1 {
+                l = emit_mov_imm64(code_buf, l, 0, s1);
+            } else {
+                l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+            }
+            l = emit_store_slot_typed(code_buf, l, call_slot, type_id);
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+        }
+
+        if op == UIR_CALL {
+            let arg_cnt = s2;
+            let ai = 0;
+            while ai < arg_cnt {
+                let call_slot = (max_vreg + 2 + ai) * 8;
+                if ai == 0 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 199); # mov rdi, rax
+                }
+                if ai == 1 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 198); # mov rsi, rax
+                }
+                if ai == 2 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 194); # mov rdx, rax
+                }
+                if ai == 3 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 193); # mov rcx, rax
+                }
+                if ai == 4 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 73); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 192); # mov r8, rax
+                }
+                if ai == 5 {
+                    l = emit_load_slot_typed(code_buf, l, call_slot, TYPE_I64);
+                    l = emit_byte(code_buf, l, 73); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 193); # mov r9, rax
+                }
+                ai = ai + 1;
+            }
+            let num_stack = 0;
+            let alloc_bytes = 0;
+            if arg_cnt > 6 {
+                num_stack = arg_cnt - 6;
+                let alloc_slots = num_stack;
+                if (num_stack % 2) == 1 {
+                    alloc_slots = num_stack + 1;
+                }
+                alloc_bytes = alloc_slots * 8;
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 129); l = emit_byte(code_buf, l, 236);
+                l = emit_disp32(code_buf, l, alloc_bytes);
+
+                let si = 0;
+                while si < num_stack {
+                    let cslot = (max_vreg + 2 + 6 + si) * 8;
+                    l = emit_load_slot_typed(code_buf, l, cslot, TYPE_I64);
+                    let ddisp = si * 8;
+                    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137);
+                    if ddisp == 0 {
+                        l = emit_byte(code_buf, l, 4); l = emit_byte(code_buf, l, 36);
+                    } else {
+                        if ddisp <= 127 {
+                            l = emit_byte(code_buf, l, 68); l = emit_byte(code_buf, l, 36); l = emit_byte(code_buf, l, ddisp);
+                        } else {
+                            l = emit_byte(code_buf, l, 132); l = emit_byte(code_buf, l, 36); l = emit_disp32(code_buf, l, ddisp);
+                        }
+                    }
+                    si = si + 1;
+                }
+            }
+            let target_fn_hash = s1;
+            let call_patch = l + 1;
+            l = emit_call_rel32(code_buf, l, 0);
+            if alloc_bytes > 0 {
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 129); l = emit_byte(code_buf, l, 196);
+                l = emit_disp32(code_buf, l, alloc_bytes);
+            }
+            if prog_call_patches > 0 {
+                let cp_count = get_qword(prog_call_patches, 0);
+                set_qword(prog_call_patches, 1 + cp_count * 2 + 0, target_fn_hash);
+                set_qword(prog_call_patches, 1 + cp_count * 2 + 1, call_patch);
+                set_qword(prog_call_patches, 0, cp_count + 1);
+            }
+            if dst >= 0 {
+                l = uir_bridge_store_vreg(code_buf, l, dst, type_id, intervals);
+                cached_rax_vreg = dst;
+                cached_rax_type = type_id;
+            } else {
+                cached_rax_vreg = -1;
+                cached_rax_type = -1;
+            }
+        }
+
+        # Control Flow
+        if op == UIR_LABEL {
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+            let lbl = dst;
+            set_qword(label_tbl, lbl, l);
+            let p_count = get_qword(patch_tbl, lbl * 4 + 0);
+            let pi = 0;
+            while pi < p_count {
+                let p_pos = get_qword(patch_tbl, lbl * 4 + 1 + pi);
+                emit_backpatch32(code_buf, p_pos, l);
+                pi = pi + 1;
+            }
+        }
+
+        if op == UIR_JUMP {
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+            let lbl = dst;
+            let target = get_qword(label_tbl, lbl);
+            if target >= 0 {
+                let disp = target - (l + 5);
+                l = emit_jmp_rel32(code_buf, l, disp);
+            } else {
+                let p_pos = l + 1;
+                l = emit_jmp_rel32(code_buf, l, 0);
+                let p_count = get_qword(patch_tbl, lbl * 4 + 0);
+                if p_count < 3 {
+                    set_qword(patch_tbl, lbl * 4 + 1 + p_count, p_pos);
+                    set_qword(patch_tbl, lbl * 4 + 0, p_count + 1);
+                }
+            }
+        }
+
+        if op == UIR_BRANCH {
+            let jcc_code = 133;
+            if fused_cmp_jcc >= 0 {
+                jcc_code = fused_cmp_jcc;
+                fused_cmp_jcc = -1;
+            } else {
+                l = uir_bridge_load_cached(code_buf, l, s1, TYPE_BOOL, intervals, cached_rax_vreg, cached_rax_type);
+                l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 133); l = emit_byte(code_buf, l, 192); # test rax, rax
+            }
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+
+            let lbl_t = dst;
+            let target_t = get_qword(label_tbl, lbl_t);
+            if target_t >= 0 {
+                let disp_t = target_t - (l + 6);
+                l = emit_byte(code_buf, l, 15); l = emit_byte(code_buf, l, jcc_code);
+                l = emit_disp32(code_buf, l, disp_t);
+            } else {
+                let p_pos_t = l + 2;
+                l = emit_byte(code_buf, l, 15); l = emit_byte(code_buf, l, jcc_code);
+                l = emit_disp32(code_buf, l, 0);
+                let p_cnt_t = get_qword(patch_tbl, lbl_t * 4 + 0);
+                if p_cnt_t < 3 {
+                    set_qword(patch_tbl, lbl_t * 4 + 1 + p_cnt_t, p_pos_t);
+                    set_qword(patch_tbl, lbl_t * 4 + 0, p_cnt_t + 1);
+                }
+            }
+
+            let lbl_f = s2;
+            let target_f = get_qword(label_tbl, lbl_f);
+            if target_f >= 0 {
+                let disp_f = target_f - (l + 5);
+                l = emit_jmp_rel32(code_buf, l, disp_f);
+            } else {
+                let p_pos_f = l + 1;
+                l = emit_jmp_rel32(code_buf, l, 0);
+                let p_cnt_f = get_qword(patch_tbl, lbl_f * 4 + 0);
+                if p_cnt_f < 3 {
+                    set_qword(patch_tbl, lbl_f * 4 + 1 + p_cnt_f, p_pos_f);
+                    set_qword(patch_tbl, lbl_f * 4 + 0, p_cnt_f + 1);
+                }
+            }
+        }
+
+        if op == UIR_RETURN {
+            if s1 >= 0 {
+                if imm1 == 1 {
+                    l = emit_mov_imm64(code_buf, l, 0, s1);
+                } else {
+                    l = uir_bridge_load_cached(code_buf, l, s1, type_id, intervals, cached_rax_vreg, cached_rax_type);
+                }
+            }
+            cached_rax_vreg = -1;
+            cached_rax_type = -1;
+            let patch_pos = l + 1;
+            l = emit_jmp_rel32(code_buf, l, 0);
+            set_qword(epilogue_patches, epilogue_patch_count, patch_pos);
+            epilogue_patch_count = epilogue_patch_count + 1;
+        }
+
+        idx = idx + 1;
+    }
+
+    # Epilogue position
+    let epilogue_pos = l;
+    let pi = 0;
+    while pi < epilogue_patch_count {
+        let p_pos = get_qword(epilogue_patches, pi);
+        emit_backpatch32(code_buf, p_pos, epilogue_pos);
+        pi = pi + 1;
+    }
+
+    # Epilogue: mov rsp, rbp; pop rbp; pop callee-saved (reverse order); ret
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 236);
+    l = emit_byte(code_buf, l, 93);
+    if use_r15 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 95); }
+    if use_r14 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 94); }
+    if use_r13 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 93); }
+    if use_r12 == 1 { l = emit_byte(code_buf, l, 65); l = emit_byte(code_buf, l, 92); }
+    if use_rbx == 1 { l = emit_byte(code_buf, l, 91); }
+    l = emit_byte(code_buf, l, 195);
+
+    return l;
+}
+
+
+# ------------------------------------------------------------------------------
+# uir_bridge_compile_program:
+# Compiles a complete multi-function UIR program into native machine bytes.
+# Sets up entrypoint jump, Linux _start stub, compiles all functions, and backpatches calls.
+# ------------------------------------------------------------------------------
+fn uir_bridge_compile_program(uir_buf: i64, code_buf: i64): i64 {
+    let l = 0;
+
+    # 1. Emit top-level entry jump: jmp main (E9 00 00 00 00)
+    let main_entry_patch = l + 1;
+    l = emit_jmp_rel32(code_buf, l, 0);
+
+    # 2. Emit _start (native Linux process startup at offset 5):
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 49); l = emit_byte(code_buf, l, 237); # xor rbp, rbp
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 139); l = emit_byte(code_buf, l, 60); l = emit_byte(code_buf, l, 36); # mov rdi, [rsp]
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 141); l = emit_byte(code_buf, l, 116); l = emit_byte(code_buf, l, 36); l = emit_byte(code_buf, l, 8); # lea rsi, [rsp+8]
+    let start_call_patch = l + 1;
+    l = emit_byte(code_buf, l, 232); l = emit_disp32(code_buf, l, 0); # call main
+    l = emit_byte(code_buf, l, 72); l = emit_byte(code_buf, l, 137); l = emit_byte(code_buf, l, 199); # mov rdi, rax
+    l = emit_byte(code_buf, l, 184); l = emit_disp32(code_buf, l, 60); # mov eax, 60 (sys_exit)
+    l = emit_byte(code_buf, l, 15); l = emit_byte(code_buf, l, 5); # syscall
+
+    # Function table & call patch table
+    let func_tbl = sys_mmap_page(); # [fn_hash, offset]
+    let func_count = 0;
+    let call_patches = sys_mmap_page(); # [fn_hash, patch_pos]
+    set_qword(call_patches, 0, 0); # count = 0
+
+    # Scan and compile each function
+    let total_nodes = uir_get_count(uir_buf);
+    let ni = 0;
+    while ni < total_nodes {
+        let n_addr = uir_node_addr(uir_buf, ni);
+        if get_qword(n_addr, 0) == UIR_FUNCTION_START {
+            let fn_hash = get_qword(n_addr, 4);
+            let fn_start_node = ni;
+            let fn_end_node = ni + 1;
+            let searching = 1;
+            while (fn_end_node < total_nodes) & (searching == 1) {
+                let check_addr = uir_node_addr(uir_buf, fn_end_node);
+                if get_qword(check_addr, 0) == UIR_FUNCTION_END {
+                    searching = 0;
+                } else {
+                    fn_end_node = fn_end_node + 1;
+                }
+            }
+
+            set_qword(func_tbl, func_count * 2 + 0, fn_hash);
+            set_qword(func_tbl, func_count * 2 + 1, l);
+            func_count = func_count + 1;
+
+            l = uir_bridge_compile_function_with_patches(uir_buf, fn_start_node, fn_end_node, code_buf, l, call_patches);
+            ni = fn_end_node;
+        }
+        ni = ni + 1;
+    }
+
+    # Find main function offset (hash for 'main' = 6385467242)
+    let main_hash = 6385467242;
+    let main_offset = -1;
+    let fi = 0;
+    while fi < func_count {
+        if get_qword(func_tbl, fi * 2 + 0) == main_hash {
+            main_offset = get_qword(func_tbl, fi * 2 + 1);
+        }
+        fi = fi + 1;
+    }
+    if main_offset >= 0 {
+        emit_backpatch32(code_buf, main_entry_patch, main_offset);
+        emit_backpatch32(code_buf, start_call_patch, main_offset);
+    } else {
+        return -1;
+    }
+
+    # Backpatch all user function calls
+    let total_calls = get_qword(call_patches, 0);
+    let ci = 0;
+    while ci < total_calls {
+        let target_hash = get_qword(call_patches, 1 + ci * 2 + 0);
+        let patch_pos = get_qword(call_patches, 1 + ci * 2 + 1);
+        let target_offset = -1;
+        fi = 0;
+        while fi < func_count {
+            if get_qword(func_tbl, fi * 2 + 0) == target_hash {
+                target_offset = get_qword(func_tbl, fi * 2 + 1);
+            }
+            fi = fi + 1;
+        }
+        if target_offset >= 0 {
+            emit_backpatch32(code_buf, patch_pos, target_offset);
+        } else {
+            return -1;
+        }
+        ci = ci + 1;
+    }
+
+    return l;
+}

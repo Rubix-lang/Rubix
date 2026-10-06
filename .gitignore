@@ -1,0 +1,19 @@
+# Build artifacts
+scratch/
+bin/*.elf
+bin/*.bin
+*.o
+
+# Archived stdlib
+std/archive/
+
+# Temporary files
+tmp*
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

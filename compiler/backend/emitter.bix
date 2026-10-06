@@ -1,0 +1,1959 @@
+# emitter.bix - direct x86-64 machine-code emitter
+
+
+fn emit_byte(buf: i64, len: i64, b: i64): i64 {
+    set_byte(buf, len, b);
+    return len + 1;
+}
+
+fn emit_add_rax_imm32(buf: i64, len: i64, offset: i64): i64 {
+    let l = len;
+    if offset == 0 {
+        return l;
+    }
+    if offset >= -128 {
+        if offset <= 127 {
+            # add rax, imm8 (48 83 C0 ib)
+            let b = offset;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72);
+            l = emit_byte(buf, l, 131);
+            l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, b);
+            return l;
+        }
+    }
+    # add rax, imm32 (48 05 disp32)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 5);
+    l = emit_disp32(buf, l, offset);
+    return l;
+}
+
+fn emit_field_load_typed(buf: i64, len: i64, offset: i64, type_id: i64): i64 {
+    let l = len;
+    if offset == 0 {
+        return emit_deref_load_typed(buf, l, type_id);
+    }
+    if offset < 128 {
+        let disp8 = offset % 256;
+        if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+            # movsxd rax, dword ptr [rax + disp8] (48 63 40 disp8)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 99); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_U8 {
+            # movzx eax, byte ptr [rax + disp8] (0F B6 40 disp8)
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_BOOL {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        # TYPE_I64 / TYPE_PTR / TYPE_STR / default: mov rax, [rax + disp8] (48 8B 40 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 64); l = emit_byte(buf, l, disp8);
+        return l;
+    }
+    # offset >= 128: 32-bit displacement (ModRM = 0x80 = 128)
+    if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 99); l = emit_byte(buf, l, 128);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    if type_id == TYPE_U8 {
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 128);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    if type_id == TYPE_BOOL {
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 128);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / TYPE_STR / default: mov rax, [rax + disp32] (48 8B 80 disp32)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 128);
+    l = emit_disp32(buf, l, offset);
+    return l;
+}
+
+fn emit_field_store_typed(buf: i64, len: i64, offset: i64, type_id: i64): i64 {
+    let l = len;
+    if offset == 0 {
+        return emit_deref_store_typed(buf, l, type_id);
+    }
+    if offset < 128 {
+        let disp8 = offset % 256;
+        if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+            # mov [rcx + disp8], eax (89 41 disp8)
+            l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 65); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_U8 {
+            # mov [rcx + disp8], al (88 41 disp8)
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 65); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_BOOL {
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 65); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        # TYPE_I64 / TYPE_PTR / default: mov [rcx + disp8], rax (48 89 41 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 65); l = emit_byte(buf, l, disp8);
+        return l;
+    }
+    # offset >= 128: 32-bit displacement (ModRM = 0x81 = 129)
+    if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+        l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 129);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    if type_id == TYPE_U8 {
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 129);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    if type_id == TYPE_BOOL {
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 129);
+        l = emit_disp32(buf, l, offset);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov [rcx + disp32], rax (48 89 81 disp32)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 129);
+    l = emit_disp32(buf, l, offset);
+    return l;
+}
+
+fn emit_mov_imm64(buf: i64, len: i64, reg: i64, imm: i64): i64 {
+    let l = len;
+    if reg == 0 {
+        if imm == 0 {
+            # xor eax, eax (31 C0) - zeroes rax in 2 bytes
+            l = emit_byte(buf, l, 49);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+    }
+    # Optimization: use 32-bit form (5 bytes) for constants in [0, 2147483647].
+    # mov eax/ecx/edx/ebx, imm32 zero-extends to 64 bits — correct for non-negative values.
+    # This saves 5 bytes per constant load vs the 10-byte REX.W mov rax, imm64.
+    if imm >= 0 {
+        if imm <= 2147483647 {
+            if reg < 4 {
+                # mov e[ax/cx/dx/bx], imm32 — no REX prefix needed for low 8 regs
+                l = emit_byte(buf, l, 184 + reg); # B8+rd
+                l = emit_byte(buf, l, imm & 255);
+                l = emit_byte(buf, l, (imm >> 8) & 255);
+                l = emit_byte(buf, l, (imm >> 16) & 255);
+                l = emit_byte(buf, l, (imm >> 24) & 255);
+                return l;
+            }
+        }
+    }
+    # REX.W (48) for full 64-bit immediate or r8-r15
+    l = emit_byte(buf, l, 72);
+    # 0xB8 + reg
+    l = emit_byte(buf, l, 184 + reg);
+
+    # 8-byte little endian immediate
+    let n = imm;
+    let i = 0;
+    while i < 8 {
+        l = emit_byte(buf, l, n & 255);
+        n = n >> 8;
+        i = i + 1;
+    }
+    return l;
+}
+
+# Fast constant multiply on rax using LEA or shift (k in 1..9).
+# Returns new len, or -1 to fall back to imul.
+fn emit_mul_by_const(buf: i64, len: i64, k: i64): i64 {
+    let l = len;
+    if k == 1 {
+        # x * 1 = x — identity, no instruction needed
+        return l;
+    }
+    if k == 2 {
+        # shl rax, 1 (48 D1 E0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 209); l = emit_byte(buf, l, 224);
+        return l;
+    }
+    if k == 3 {
+        # lea rax, [rax + rax*2] (48 8D 04 40)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 64);
+        return l;
+    }
+    if k == 4 {
+        # shl rax, 2 (48 C1 E0 02)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 2);
+        return l;
+    }
+    if k == 5 {
+        # lea rax, [rax + rax*4] (48 8D 04 80)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 128);
+        return l;
+    }
+    if k == 8 {
+        # shl rax, 3 (48 C1 E0 03)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 3);
+        return l;
+    }
+    if k == 9 {
+        # lea rax, [rax + rax*8] (48 8D 04 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    return -1;
+}
+
+
+
+# ------------------------------------------------------------------------------
+# emit_div_by_const(buf, len, d) -> new_len or -1
+# Emits code to divide rax (signed i64) by constant d (d > 0).
+# Output: rax = rax / d  (signed truncation toward zero)
+# Clobbers: rdx, rdi (push/pop to preserve rdi)
+# Uses GCC-style multiplicative inverse — eliminates idiv entirely.
+# ------------------------------------------------------------------------------
+fn emit_div_by_const(buf: i64, len: i64, d: i64): i64 {
+    let l = len;
+    # Power-of-2: signed division by 2^k needs rounding correction
+    # GCC pattern: mov rcx,rax; sar rcx,63; shr rcx,(64-k); add rax,rcx; sar rax,k
+    if d == 2 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193); # mov rcx,rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63); # sar rcx,63
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 63); # shr rcx,63
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200); # add rax,rcx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 209); l = emit_byte(buf, l, 248); # sar rax,1
+        return l;
+    }
+    if d == 4 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 62);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, 2);
+        return l;
+    }
+    if d == 8 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 61);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, 3);
+        return l;
+    }
+    if d == 16 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 60);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, 4);
+        return l;
+    }
+    if d == 32 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 59);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, 5);
+        return l;
+    }
+    if d == 64 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 249); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 233); l = emit_byte(buf, l, 58);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, 6);
+        return l;
+    }
+
+    # Magic multiplier for non-power-of-2 divisors.
+    # Encodings of magic as two 32-bit halves (in decimal to avoid hex literals).
+    # magic = magic_hi * 2^32 + magic_lo  (both unsigned 32-bit)
+    # Scratch register r11 is caller-saved and avoids stack pushes:
+    #   mov r11, rax      (49 89 C3)
+    #   movabs rax, magic (48 B8 lo0 lo1 lo2 lo3 hi0 hi1 hi2 hi3)
+    #   imul r11          (49 F7 EB) -> rdx:rax = magic * x, rdx = high64
+    #   [add rdx, r11]    (4C 01 DA) -> if post_add
+    #   sar r11, 63       (49 C1 FB 3F) -> r11 = sign(x): 0 or -1
+    #   [sar rdx, sh]     -> if sh > 0
+    #   mov rax, rdx      (48 89 D0)
+    #   sub rax, r11      (4C 29 D8) -> rax = quotient
+    let magic_lo = 0;
+    let magic_hi = 0;
+    let sh = 0;
+    let post_add = 0;
+    # d=3: 0x5555555555555556, sh=0
+    if d == 3  { magic_lo = 1431655766; magic_hi = 1431655765; sh = 0; post_add = 0; }
+    # d=5: 0x6666666666666667, sh=1
+    if d == 5  { magic_lo = 1717986919; magic_hi = 1717986918; sh = 1; post_add = 0; }
+    # d=6: 0x2aaaaaaaaaaaaaab, sh=0
+    if d == 6  { magic_lo = 2863311531; magic_hi = 715827882; sh = 0; post_add = 0; }
+    # d=7: 0x4924924924924925, sh=1
+    if d == 7  { magic_lo = 613566757; magic_hi = 1227133513; sh = 1; post_add = 0; }
+    # d=9: 0x1c71c71c71c71c72, sh=0
+    if d == 9  { magic_lo = 1908874354; magic_hi = 477218588; sh = 0; post_add = 0; }
+    # d=10: 0x6666666666666667, sh=2
+    if d == 10 { magic_lo = 1717986919; magic_hi = 1717986918; sh = 2; post_add = 0; }
+    # d=11: 0x2e8ba2e8ba2e8ba3, sh=1
+    if d == 11 { magic_lo = 3123612579; magic_hi = 780903144; sh = 1; post_add = 0; }
+    # d=12: 0x2aaaaaaaaaaaaaab, sh=1
+    if d == 12 { magic_lo = 2863311531; magic_hi = 715827882; sh = 1; post_add = 0; }
+    # d=13: 0x4ec4ec4ec4ec4ec5, sh=2
+    if d == 13 { magic_lo = 3303820997; magic_hi = 1321528398; sh = 2; post_add = 0; }
+    # d=14: 0x4924924924924925, sh=2
+    if d == 14 { magic_lo = 613566757; magic_hi = 1227133513; sh = 2; post_add = 0; }
+    # d=15: 0x8888888888888889, sh=3, post_add=1
+    if d == 15 { magic_lo = 2290649225; magic_hi = 2290649224; sh = 3; post_add = 1; }
+    # d=17: 0x7878787878787879, sh=3
+    if d == 17 { magic_lo = 2021161081; magic_hi = 2021161080; sh = 3; post_add = 0; }
+    # d=18: 0xe38e38e38e38e39, sh=0
+    if d == 18 { magic_lo = 954437177; magic_hi = 238609294; sh = 0; post_add = 0; }
+    # d=20: 0x6666666666666667, sh=3
+    if d == 20 { magic_lo = 1717986919; magic_hi = 1717986918; sh = 3; post_add = 0; }
+    # d=24: 0x2aaaaaaaaaaaaaab, sh=2
+    if d == 24 { magic_lo = 2863311531; magic_hi = 715827882; sh = 2; post_add = 0; }
+    # d=25: 0xa3d70a3d70a3d70b, sh=4, post_add=1
+    if d == 25 { magic_lo = 1889785611; magic_hi = 2748779069; sh = 4; post_add = 1; }
+    # d=30: 0x8888888888888889, sh=4, post_add=1
+    if d == 30 { magic_lo = 2290649225; magic_hi = 2290649224; sh = 4; post_add = 1; }
+    # d=60: 0x8888888888888889, sh=5, post_add=1
+    if d == 60 { magic_lo = 2290649225; magic_hi = 2290649224; sh = 5; post_add = 1; }
+    # d=100: 0xa3d70a3d70a3d70b, sh=6, post_add=1
+    if d == 100 { magic_lo = 1889785611; magic_hi = 2748779069; sh = 6; post_add = 1; }
+
+    if magic_lo == 0 {
+        if magic_hi == 0 {
+            return -1;
+        }
+    }
+
+    l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 195); # mov r11,rax
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184); # movabs rax, (next 8 bytes)
+    l = emit_byte(buf, l, magic_lo & 255);
+    l = emit_byte(buf, l, (magic_lo >> 8) & 255);
+    l = emit_byte(buf, l, (magic_lo >> 16) & 255);
+    l = emit_byte(buf, l, (magic_lo >> 24) & 255);
+    l = emit_byte(buf, l, magic_hi & 255);
+    l = emit_byte(buf, l, (magic_hi >> 8) & 255);
+    l = emit_byte(buf, l, (magic_hi >> 16) & 255);
+    l = emit_byte(buf, l, (magic_hi >> 24) & 255);
+    l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 235); # imul r11
+    if post_add == 1 {
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 218); # add rdx,r11
+    }
+    l = emit_byte(buf, l, 73); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 251); l = emit_byte(buf, l, 63); # sar r11,63
+    if sh == 1 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 209); l = emit_byte(buf, l, 250); # sar rdx,1
+    }
+    if sh > 1 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, sh); # sar rdx,sh
+    }
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 208); # mov rax,rdx
+    l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 216); # sub rax,r11
+    return l;
+}
+
+# ------------------------------------------------------------------------------
+# emit_mod_by_const(buf, len, d) -> new_len or -1
+# rax = rax % d  (signed, truncation toward zero)
+# Strategy: save x in rcx; emit x/d into rax; rax = x - q*d (via rcx)
+# ------------------------------------------------------------------------------
+fn emit_mod_by_const(buf: i64, len: i64, d: i64): i64 {
+    let l = len;
+    # Power-of-2 modulo: use signed-AND trick (no idiv, no extra scratch needed)
+    # Formula: x % 2^k = (x + sign_adj) & (2^k-1) - sign_adj
+    # Sequence: mov rdx,rax; sar rdx,63; shr rdx,(64-k); add rax,rdx; and rax,(2^k-1); sub rax,rdx
+    if d == 2 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194); # mov rdx,rax
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63); # sar rdx,63
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 63); # shr rdx,63
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208); # add rax,rdx
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 1); # and rax,1
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208); # sub rax,rdx
+        return l;
+    }
+    if d == 4 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 62); # shr rdx,62
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 3); # and rax,3
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+        return l;
+    }
+    if d == 8 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 61); # shr rdx,61
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 7); # and rax,7
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+        return l;
+    }
+    if d == 16 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 60); # shr rdx,60
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 15); # and rax,15
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+        return l;
+    }
+    if d == 32 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 59); # shr rdx,59
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 31); # and rax,31
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+        return l;
+    }
+    if d == 64 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 250); l = emit_byte(buf, l, 63);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 234); l = emit_byte(buf, l, 58); # shr rdx,58
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 208);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, 63); # and rax,63
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 208);
+        return l;
+    }
+    # Non-power-of-2: check divisor is in table BEFORE emitting any bytes.
+    # (Cannot emit then return -1 — that would corrupt the code buffer.)
+    let supported = 0;
+    if d == 3  { supported = 1; }
+    if d == 5  { supported = 1; }
+    if d == 6  { supported = 1; }
+    if d == 7  { supported = 1; }
+    if d == 9  { supported = 1; }
+    if d == 10 { supported = 1; }
+    if d == 11 { supported = 1; }
+    if d == 12 { supported = 1; }
+    if d == 13 { supported = 1; }
+    if d == 14 { supported = 1; }
+    if d == 15 { supported = 1; }
+    if d == 17 { supported = 1; }
+    if d == 18 { supported = 1; }
+    if d == 20 { supported = 1; }
+    if d == 24 { supported = 1; }
+    if d == 25 { supported = 1; }
+    if d == 30 { supported = 1; }
+    if d == 60 { supported = 1; }
+    if d == 100 { supported = 1; }
+    if supported == 0 { return -1; }
+    # Now safe to emit: all paths will complete.
+    # Strategy: save x in rcx; compute x/d into rax; rax *= d; rcx -= rax; rax = rcx
+    # emit_div_by_const uses scratch r11 and clobbers rdx but NOT rcx. Safe.
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 193); # mov rcx,rax
+    let div_l = emit_div_by_const(buf, l, d);
+    l = div_l;  # div always succeeds since d is supported
+    if d == 3  { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 64); } # lea rax,[rax+rax*2]
+    if d == 5  { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 128); } # lea rax,[rax+rax*4]
+    if d == 6  { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 6); }
+    if d == 7  { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 7); }
+    if d == 9  { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 192); } # lea rax,[rax+rax*8]
+    if d == 10 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 10); }
+    if d == 11 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 11); }
+    if d == 12 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 12); }
+    if d == 13 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 13); }
+    if d == 14 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 14); }
+    if d == 15 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 15); }
+    if d == 17 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 17); }
+    if d == 18 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 18); }
+    if d == 20 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 20); }
+    if d == 24 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 24); }
+    if d == 25 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 25); }
+    if d == 30 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 30); }
+    if d == 60 { l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, 60); }
+    if d == 100 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 105); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 100); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+    }
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 193); # sub rcx,rax
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 200); # mov rax,rcx
+    return l;
+}
+
+
+fn emit_disp32(buf: i64, len: i64, disp32: i64): i64 {
+    let l = len;
+    l = emit_byte(buf, l, disp32 & 255);
+    l = emit_byte(buf, l, (disp32 >> 8) & 255);
+    l = emit_byte(buf, l, (disp32 >> 16) & 255);
+    l = emit_byte(buf, l, (disp32 >> 24) & 255);
+    return l;
+}
+
+fn emit_store_slot_typed(buf: i64, len: i64, slot: i64, type_id: i64): i64 {
+    let l = len;
+    if slot < 128 {
+        let disp8 = (256 - slot) % 256;
+        if (type_id == TYPE_I32) | (type_id == TYPE_F32) | (type_id == TYPE_CHAR) {
+            l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_U8 {
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_BOOL {
+            l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if (type_id == TYPE_OPTION) | (type_id == TYPE_RESULT) | (type_id == TYPE_TUPLE) {
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            let disp8_pay = (disp8 + 8) % 256;
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 85); l = emit_byte(buf, l, disp8_pay);
+            return l;
+        }
+        # TYPE_I64 / TYPE_PTR / default: mov [rbp - disp8], rax (48 89 45 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+        return l;
+    }
+    # slot >= 128: 32-bit negative displacement (ModRM = 0x85 = 133)
+    let disp32 = 4294967296 - slot;
+    if (type_id == TYPE_I32) | (type_id == TYPE_F32) | (type_id == TYPE_CHAR) {
+        l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if type_id == TYPE_U8 {
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if type_id == TYPE_BOOL {
+        l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if (type_id == TYPE_OPTION) | (type_id == TYPE_RESULT) | (type_id == TYPE_TUPLE) {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        let disp32_pay = disp32 + 8;
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 149);
+        l = emit_disp32(buf, l, disp32_pay);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov [rbp - disp32], rax (48 89 85 disp32)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 133);
+    l = emit_disp32(buf, l, disp32);
+    return l;
+}
+
+fn emit_load_slot_typed(buf: i64, len: i64, slot: i64, type_id: i64): i64 {
+    let l = len;
+    if slot < 128 {
+        let disp8 = (256 - slot) % 256;
+        if (type_id == TYPE_I32) | (type_id == TYPE_F32) | (type_id == TYPE_CHAR) {
+            l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_U8 {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if type_id == TYPE_BOOL {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            return l;
+        }
+        if (type_id == TYPE_OPTION) | (type_id == TYPE_RESULT) | (type_id == TYPE_TUPLE) {
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+            let disp8_pay = (disp8 + 8) % 256;
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 85); l = emit_byte(buf, l, disp8_pay);
+            return l;
+        }
+        # TYPE_I64 / TYPE_PTR / default: mov rax, [rbp - disp8] (48 8B 45 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8);
+        return l;
+    }
+    # slot >= 128: 32-bit negative displacement (ModRM = 0x85 = 133)
+    let disp32 = 4294967296 - slot;
+    if (type_id == TYPE_I32) | (type_id == TYPE_F32) | (type_id == TYPE_CHAR) {
+        l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if type_id == TYPE_U8 {
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if type_id == TYPE_BOOL {
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        return l;
+    }
+    if (type_id == TYPE_OPTION) | (type_id == TYPE_RESULT) | (type_id == TYPE_TUPLE) {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 133);
+        l = emit_disp32(buf, l, disp32);
+        let disp32_pay = disp32 + 8;
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 149);
+        l = emit_disp32(buf, l, disp32_pay);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov rax, [rbp - disp32] (48 8B 85 disp32)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139); l = emit_byte(buf, l, 133);
+    l = emit_disp32(buf, l, disp32);
+    return l;
+}
+
+
+fn emit_jmp_rel32(buf: i64, len: i64, disp: i64): i64 {
+    let l = len;
+    l = emit_byte(buf, l, 233); # 0xE9
+    let n = disp;
+    if n < 0 { n = n + 4294967296; }
+    l = emit_byte(buf, l, n % 256);
+    l = emit_byte(buf, l, (n / 256) % 256);
+    l = emit_byte(buf, l, (n / 65536) % 256);
+    l = emit_byte(buf, l, (n / 16777216) % 256);
+    return l;
+}
+
+fn emit_je_rel32(buf: i64, len: i64, disp: i64): i64 {
+    let l = len;
+    l = emit_byte(buf, l, 15);  # 0x0F
+    l = emit_byte(buf, l, 132); # 0x84
+    let n = disp;
+    if n < 0 { n = n + 4294967296; }
+    l = emit_byte(buf, l, n % 256);
+    l = emit_byte(buf, l, (n / 256) % 256);
+    l = emit_byte(buf, l, (n / 65536) % 256);
+    l = emit_byte(buf, l, (n / 16777216) % 256);
+    return l;
+}
+
+fn emit_call_rel32(buf: i64, len: i64, disp: i64): i64 {
+    let l = len;
+    l = emit_byte(buf, l, 232); # 0xE8
+    let n = disp;
+    if n < 0 { n = n + 4294967296; }
+    l = emit_byte(buf, l, n % 256);
+    l = emit_byte(buf, l, (n / 256) % 256);
+    l = emit_byte(buf, l, (n / 65536) % 256);
+    l = emit_byte(buf, l, (n / 16777216) % 256);
+    return l;
+}
+
+fn emit_store_param_typed(buf: i64, len: i64, param_idx: i64, slot: i64, type_id: i64): i64 {
+    let l = len;
+    let disp8 = (256 - slot) % 256;
+    if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+        if param_idx == 0 { l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 125); l = emit_byte(buf, l, disp8); return l; } # EDI (89 7D disp8)
+        if param_idx == 1 { l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 117); l = emit_byte(buf, l, disp8); return l; } # ESI (89 75 disp8)
+        if param_idx == 2 { l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 85);  l = emit_byte(buf, l, disp8); return l; } # EDX (89 55 disp8)
+        if param_idx == 3 { l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 77);  l = emit_byte(buf, l, disp8); return l; } # ECX (89 4D disp8)
+        if param_idx == 4 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8); return l; } # R8D (44 89 45 disp8)
+        if param_idx == 5 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 77); l = emit_byte(buf, l, disp8); return l; } # R9D (44 89 4D disp8)
+        return l;
+    }
+    if type_id == TYPE_U8 {
+        if param_idx == 0 { l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 125); l = emit_byte(buf, l, disp8); return l; } # DIL (40 88 7D disp8)
+        if param_idx == 1 { l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 117); l = emit_byte(buf, l, disp8); return l; } # SIL (40 88 75 disp8)
+        if param_idx == 2 { l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 85);  l = emit_byte(buf, l, disp8); return l; } # DL (88 55 disp8)
+        if param_idx == 3 { l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 77);  l = emit_byte(buf, l, disp8); return l; } # CL (88 4D disp8)
+        if param_idx == 4 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8); return l; } # R8B (44 88 45 disp8)
+        if param_idx == 5 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 77); l = emit_byte(buf, l, disp8); return l; } # R9B (44 88 4D disp8)
+        return l;
+    }
+    if type_id == TYPE_BOOL {
+        if param_idx == 0 { l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 125); l = emit_byte(buf, l, disp8); return l; } # DIL
+        if param_idx == 1 { l = emit_byte(buf, l, 64); l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 117); l = emit_byte(buf, l, disp8); return l; } # SIL
+        if param_idx == 2 { l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 85);  l = emit_byte(buf, l, disp8); return l; } # DL
+        if param_idx == 3 { l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 77);  l = emit_byte(buf, l, disp8); return l; } # CL
+        if param_idx == 4 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8); return l; } # R8B
+        if param_idx == 5 { l = emit_byte(buf, l, 68);  l = emit_byte(buf, l, 136); l = emit_byte(buf, l, 77); l = emit_byte(buf, l, disp8); return l; } # R9B
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: 64-bit store
+    if param_idx == 0 { # RDI (48 89 7D disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 125); l = emit_byte(buf, l, disp8); return l;
+    }
+    if param_idx == 1 { # RSI (48 89 75 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 117); l = emit_byte(buf, l, disp8); return l;
+    }
+    if param_idx == 2 { # RDX (48 89 55 disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 85); l = emit_byte(buf, l, disp8); return l;
+    }
+    if param_idx == 3 { # RCX (48 89 4D disp8)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 77); l = emit_byte(buf, l, disp8); return l;
+    }
+    if param_idx == 4 { # R8 (49 89 45 disp8)
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 69); l = emit_byte(buf, l, disp8); return l;
+    }
+    if param_idx == 5 { # R9 (49 89 4D disp8)
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 77); l = emit_byte(buf, l, disp8); return l;
+    }
+    return l;
+}
+
+fn emit_mov_reg_rsp_disp(buf: i64, len: i64, reg_idx: i64, disp: i64): i64 {
+    let l = len;
+    if reg_idx == 0 { # RDI
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 124); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 188); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    if reg_idx == 1 { # RSI
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 116); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 180); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    if reg_idx == 2 { # RDX
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 84); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 148); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    if reg_idx == 3 { # RCX
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 140); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    if reg_idx == 4 { # R8
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 68); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 132); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    if reg_idx == 5 { # R9
+        l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 139);
+        if disp <= 127 {
+            l = emit_byte(buf, l, 76); l = emit_byte(buf, l, 36); l = emit_byte(buf, l, disp);
+        } else {
+            l = emit_byte(buf, l, 140); l = emit_byte(buf, l, 36); l = emit_disp32(buf, l, disp);
+        }
+        return l;
+    }
+    return l;
+}
+
+fn emit_lea_slot(buf: i64, len: i64, slot: i64): i64 {
+    let l = len;
+    if slot < 128 {
+        let disp8 = (256 - slot) % 256;
+        # lea rax, [rbp - disp8] (48 8D 45 disp8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 141);
+        l = emit_byte(buf, l, 69);
+        l = emit_byte(buf, l, disp8);
+        return l;
+    }
+    # slot >= 128: 32-bit negative displacement (ModRM = 0x85 = 133)
+    let disp32 = 4294967296 - slot;
+    # lea rax, [rbp - disp32] (48 8D 85 disp32)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 141);
+    l = emit_byte(buf, l, 133);
+    l = emit_disp32(buf, l, disp32);
+    return l;
+}
+
+
+# Binary op with LHS in rax and known immediate RHS.
+# Emits 3-7 byte reg-imm forms. Returns -1 if not handled.
+fn emit_bin_op_imm64(buf: i64, len: i64, op: i64, imm: i64, type_id: i64): i64 {
+    let l = len;
+    # We only handle TYPE_I64 / TYPE_INT_LIT for now (most common hot path).
+    if type_id != TYPE_I64 {
+        if type_id != TYPE_INT_LIT {
+            return -1;
+        }
+    }
+
+    # Immediate forms: prefer imm8 (3 bytes) when imm fits in [-128,127].
+    let is_imm8 = 0;
+    if imm >= -128 {
+        if imm <= 127 {
+            is_imm8 = 1;
+        }
+    }
+    let is_imm32 = 0;
+    if imm >= -2147483648 {
+        if imm <= 2147483647 {
+            is_imm32 = 1;
+        }
+    }
+
+    if op == TOKEN_PLUS {
+        if imm == 1 {
+            # inc rax (48 FF C0)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if imm == -1 {
+            # dec rax (48 FF C8)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 200);
+            return l;
+        }
+        if is_imm8 == 1 {
+            # add rax, imm8 (48 83 C0 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, b & 255);
+            return l;
+        }
+        if is_imm32 == 1 {
+            # add rax, imm32 (48 81 C0 id)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 192);
+            l = emit_disp32(buf, l, imm);
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_MINUS {
+        if imm == 1 {
+            # dec rax (48 FF C8)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 200);
+            return l;
+        }
+        if imm == -1 {
+            # inc rax
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if is_imm8 == 1 {
+            # sub rax, imm8 (48 83 E8 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 232); l = emit_byte(buf, l, b & 255);
+            return l;
+        }
+        if is_imm32 == 1 {
+            # sub rax, imm32 (48 81 E8 id)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 232);
+            l = emit_disp32(buf, l, imm);
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_STAR {
+        let new_l = emit_mul_by_const(buf, l, imm);
+        if new_l >= 0 { return new_l; }
+        if is_imm32 == 1 {
+            # imul rax, rax, imm32 (48 69 C0 id)  or imm8 form (48 6B C0 ib)
+            if is_imm8 == 1 {
+                let b = imm;
+                if b < 0 { b = b + 256; }
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 192); l = emit_byte(buf, l, b & 255);
+            } else {
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 105); l = emit_byte(buf, l, 192);
+                l = emit_disp32(buf, l, imm);
+            }
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_AMP {
+        if is_imm8 == 1 {
+            # and rax, imm8 (48 83 E0 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, b & 255);
+            return l;
+        }
+        if is_imm32 == 1 {
+            # and rax, imm32 (48 81 E0 id)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 224);
+            l = emit_disp32(buf, l, imm);
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_PIPE {
+        if is_imm8 == 1 {
+            # or rax, imm8 (48 83 C8 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 200); l = emit_byte(buf, l, b & 255);
+            return l;
+        }
+        if is_imm32 == 1 {
+            # or rax, imm32 (48 81 C8 id)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 200);
+            l = emit_disp32(buf, l, imm);
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_CARET {
+        if is_imm8 == 1 {
+            # xor rax, imm8 (48 83 F0 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 240); l = emit_byte(buf, l, b & 255);
+            return l;
+        }
+        if is_imm32 == 1 {
+            # xor rax, imm32 (48 81 F0 id)
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 240);
+            l = emit_disp32(buf, l, imm);
+            return l;
+        }
+        return -1;
+    }
+
+    if op == TOKEN_SHL {
+        if imm >= 0 {
+            if imm <= 63 {
+                if imm == 1 {
+                    # shl rax, 1 (48 D1 E0) — short form
+                    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 209); l = emit_byte(buf, l, 224);
+                    return l;
+                }
+                # shl rax, imm8 (48 C1 E0 ib)
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 224); l = emit_byte(buf, l, imm & 63);
+                return l;
+            }
+        }
+        return -1;
+    }
+
+    if op == TOKEN_SHR {
+        if imm >= 0 {
+            if imm <= 63 {
+                if imm == 1 {
+                    # shr rax, 1 (48 D1 E8)
+                    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 209); l = emit_byte(buf, l, 232);
+                    return l;
+                }
+                # shr rax, imm8 (48 C1 E8 ib) — LOGICAL right shift
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 193); l = emit_byte(buf, l, 232); l = emit_byte(buf, l, imm & 63);
+                return l;
+            }
+        }
+        return -1;
+    }
+
+    # TOKEN_PERCENT and TOKEN_SLASH use idiv via the standard fallback path.
+    # Magic number strength reduction is available but applied via direct call only.
+    # Comparisons: cmp rax, imm; setcc al; movzx rax, al
+    let is_cmp = 0;
+    let cc_byte = 148;
+    if op == TOKEN_EQUAL_EQUAL { is_cmp = 1; cc_byte = 148; }
+    if op == TOKEN_NOT_EQUAL   { is_cmp = 1; cc_byte = 149; }
+    if op == TOKEN_LESS        { is_cmp = 1; cc_byte = 156; }
+    if op == TOKEN_GREATER     { is_cmp = 1; cc_byte = 159; }
+    if op == TOKEN_LESS_EQ     { is_cmp = 1; cc_byte = 158; }
+    if op == TOKEN_GREATER_EQ  { is_cmp = 1; cc_byte = 157; }
+    if is_cmp == 1 {
+        if is_imm8 == 1 {
+            # cmp rax, imm8 (48 83 F8 ib)
+            let b = imm;
+            if b < 0 { b = b + 256; }
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 131); l = emit_byte(buf, l, 248); l = emit_byte(buf, l, b & 255);
+        } else {
+            if is_imm32 == 1 {
+                # cmp rax, imm32 (48 81 F8 id)
+                l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 129); l = emit_byte(buf, l, 248);
+                l = emit_disp32(buf, l, imm);
+            } else {
+                return -1;
+            }
+        }
+        # setcc al; movzx rax, al
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, cc_byte); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+
+    return -1;
+}
+
+fn emit_deref_load_typed(buf: i64, len: i64, pointee_type: i64): i64 {
+    let l = len;
+    if (pointee_type == TYPE_I32) | (pointee_type == TYPE_CHAR) {
+        # movsxd rax, dword ptr [rax] (48 63 00)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 99);
+        l = emit_byte(buf, l, 0);
+        return l;
+    }
+    if pointee_type == TYPE_U8 {
+        # movzx eax, byte ptr [rax] (0F B6 00)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 0);
+        return l;
+    }
+    if pointee_type == TYPE_BOOL {
+        # movzx eax, byte ptr [rax] (0F B6 00)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 0);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov rax, [rax] (48 8B 00)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 139);
+    l = emit_byte(buf, l, 0);
+    return l;
+}
+
+fn emit_deref_store_typed(buf: i64, len: i64, pointee_type: i64): i64 {
+    let l = len;
+    if (pointee_type == TYPE_I32) | (pointee_type == TYPE_CHAR) {
+        # mov [rcx], eax (89 01)
+        l = emit_byte(buf, l, 137);
+        l = emit_byte(buf, l, 1);
+        return l;
+    }
+    if pointee_type == TYPE_U8 {
+        # mov [rcx], al (88 01)
+        l = emit_byte(buf, l, 136);
+        l = emit_byte(buf, l, 1);
+        return l;
+    }
+    if pointee_type == TYPE_BOOL {
+        # mov [rcx], al (88 01)
+        l = emit_byte(buf, l, 136);
+        l = emit_byte(buf, l, 1);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov [rcx], rax (48 89 01)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 1);
+    return l;
+}
+
+fn emit_index_load_typed(buf: i64, len: i64, pointee_type: i64): i64 {
+    let l = len;
+    if (pointee_type == TYPE_I32) | (pointee_type == TYPE_CHAR) {
+        # movsxd rax, dword ptr [rdi + rsi*4] (48 63 04 B7)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 99);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 183);
+        return l;
+    }
+    if pointee_type == TYPE_U8 {
+        # movzx eax, byte ptr [rdi + rsi] (0F B6 04 37)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 55);
+        return l;
+    }
+    if pointee_type == TYPE_BOOL {
+        # movzx eax, byte ptr [rdi + rsi] (0F B6 04 37)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 55);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov rax, qword ptr [rdi + rsi*8] (48 8B 04 F7)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 139);
+    l = emit_byte(buf, l, 4);
+    l = emit_byte(buf, l, 247);
+    return l;
+}
+
+fn emit_index_store_typed(buf: i64, len: i64, pointee_type: i64): i64 {
+    let l = len;
+    if (pointee_type == TYPE_I32) | (pointee_type == TYPE_CHAR) {
+        # mov dword ptr [rdi + rsi*4], eax (89 04 B7)
+        l = emit_byte(buf, l, 137);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 183);
+        return l;
+    }
+    if pointee_type == TYPE_U8 {
+        # mov byte ptr [rdi + rsi], al (88 04 37)
+        l = emit_byte(buf, l, 136);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 55);
+        return l;
+    }
+    if pointee_type == TYPE_BOOL {
+        # mov byte ptr [rdi + rsi], al (88 04 37)
+        l = emit_byte(buf, l, 136);
+        l = emit_byte(buf, l, 4);
+        l = emit_byte(buf, l, 55);
+        return l;
+    }
+    # TYPE_I64 / TYPE_PTR / default: mov qword ptr [rdi + rsi*8], rax (48 89 04 F7)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 4);
+    l = emit_byte(buf, l, 247);
+    return l;
+}
+
+fn emit_index_lea_sized(buf: i64, len: i64, elem_sz: i64): i64 {
+    let l = len;
+    if elem_sz == 4 {
+        # lea rax, [rdi + rsi*4] (48 8D 04 B7)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 183);
+        return l;
+    }
+    if elem_sz == 1 {
+        # lea rax, [rdi + rsi] (48 8D 04 37)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 55);
+        return l;
+    }
+    if elem_sz == 8 {
+        # lea rax, [rdi + rsi*8] (48 8D 04 F7)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 247);
+        return l;
+    }
+    # Arbitrary size (composite struct element): imul rsi, rsi, elem_sz; lea rax, [rdi + rsi]
+    if elem_sz < 128 {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 107); l = emit_byte(buf, l, 246); l = emit_byte(buf, l, elem_sz % 256);
+    } else {
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 105); l = emit_byte(buf, l, 246);
+        l = emit_disp32(buf, l, elem_sz);
+    }
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 141); l = emit_byte(buf, l, 4); l = emit_byte(buf, l, 55);
+    return l;
+}
+
+
+
+fn emit_bounds_check(buf: i64, len: i64, limit: i64): i64 {
+    let l = len;
+    if limit <= 0 { return l; }
+    if limit < 128 {
+        # cmp rsi, imm8 (48 83 FE imm8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 131);
+        l = emit_byte(buf, l, 254);
+        l = emit_byte(buf, l, limit % 256);
+    } else {
+        # cmp rsi, imm32 (48 81 FE imm32)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 129);
+        l = emit_byte(buf, l, 254);
+        l = emit_disp32(buf, l, limit);
+    }
+    # jb +2 (72 02)
+    l = emit_byte(buf, l, 114);
+    l = emit_byte(buf, l, 2);
+    # ud2 (0F 0B)
+    l = emit_byte(buf, l, 15);
+    l = emit_byte(buf, l, 11);
+    return l;
+}
+
+fn emit_zero_bytes(buf: i64, len: i64, slot: i64, total_bytes: i64): i64 {
+    let l = len;
+    l = emit_lea_slot(buf, l, slot);
+    # mov rdi, rax (48 89 C7)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 199);
+    # mov ecx, total_bytes (B9 imm32)
+    l = emit_byte(buf, l, 185);
+    l = emit_disp32(buf, l, total_bytes);
+    # xor eax, eax (31 C0)
+    l = emit_byte(buf, l, 49);
+    l = emit_byte(buf, l, 192);
+    # cld (FC)
+    l = emit_byte(buf, l, 252);
+    # rep stosb (F3 AA)
+    l = emit_byte(buf, l, 243);
+    l = emit_byte(buf, l, 170);
+    return l;
+}
+
+fn emit_copy_bytes(buf: i64, len: i64, dst_slot: i64, total_bytes: i64): i64 {
+    let l = len;
+    # mov rsi, rax (48 89 C6)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 198);
+    l = emit_lea_slot(buf, l, dst_slot);
+    # mov rdi, rax (48 89 C7)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 199);
+    # mov ecx, total_bytes (B9 imm32)
+    l = emit_byte(buf, l, 185);
+    l = emit_disp32(buf, l, total_bytes);
+    # cld (FC)
+    l = emit_byte(buf, l, 252);
+    # rep movsb (F3 A4)
+    l = emit_byte(buf, l, 243);
+    l = emit_byte(buf, l, 164);
+    return l;
+}
+
+fn emit_copy_bytes_to_rcx(buf: i64, len: i64, total_bytes: i64): i64 {
+    let l = len;
+    # mov rsi, rax (48 89 C6)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 198);
+    # mov rdi, rcx (48 89 CF)
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 207);
+    # mov ecx, total_bytes (B9 imm32)
+    l = emit_byte(buf, l, 185);
+    l = emit_disp32(buf, l, total_bytes);
+    # cld (FC)
+    l = emit_byte(buf, l, 252);
+    # rep movsb (F3 A4)
+    l = emit_byte(buf, l, 243);
+    l = emit_byte(buf, l, 164);
+    return l;
+}
+
+fn emit_mov_rcx_rax(buf: i64, len: i64): i64 {
+    let l = len;
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 137);
+    l = emit_byte(buf, l, 193); # 48 89 C1 (mov rcx, rax)
+    return l;
+}
+
+
+fn emit_bin_op_typed(buf: i64, len: i64, op: i64, type_id: i64): i64 {
+    let l = len;
+    if (type_id == TYPE_F64) | (type_id == TYPE_FLOAT_LIT) {
+        # movq xmm0, rax
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+        # movq xmm1, rcx
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 201);
+        if op == TOKEN_PLUS {
+            # addsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 88); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_MINUS {
+            # subsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 92); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_STAR {
+            # mulsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 89); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_SLASH {
+            # divsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 94); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+fn emit_fp_comparison(buf: i64, len: i64, op: i64): i64 {
+    let l = len;
+    if op == TOKEN_EQUAL_EQUAL {
+        # IEEE-754: equal requires ZF=1 and PF=0 (not NaN)
+        # setnp dl (0F 9B C2)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 155); l = emit_byte(buf, l, 194);
+        # sete al (0F 94 C0)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 148); l = emit_byte(buf, l, 192);
+        # and al, dl (20 D0)
+        l = emit_byte(buf, l, 32); l = emit_byte(buf, l, 208);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    if op == TOKEN_NOT_EQUAL {
+        # IEEE-754: not-equal is true if ZF=0 or PF=1 (NaN != NaN is true)
+        # setp dl (0F 9A C2)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 154); l = emit_byte(buf, l, 194);
+        # setne al (0F 95 C0)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 149); l = emit_byte(buf, l, 192);
+        # or al, dl (08 D0)
+        l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 208);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    if op == TOKEN_LESS {
+        # IEEE-754: less requires CF=1 and PF=0
+        # setnp dl (0F 9B C2)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 155); l = emit_byte(buf, l, 194);
+        # setb al (0F 92 C0)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 146); l = emit_byte(buf, l, 192);
+        # and al, dl (20 D0)
+        l = emit_byte(buf, l, 32); l = emit_byte(buf, l, 208);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    if op == TOKEN_LESS_EQ {
+        # IEEE-754: less-equal requires (CF=1 or ZF=1) and PF=0
+        # setnp dl (0F 9B C2)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 155); l = emit_byte(buf, l, 194);
+        # setbe al (0F 96 C0)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 150); l = emit_byte(buf, l, 192);
+        # and al, dl (20 D0)
+        l = emit_byte(buf, l, 32); l = emit_byte(buf, l, 208);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    if op == TOKEN_GREATER {
+        # seta al (0F 97 C0): CF=0 and ZF=0 (already false for NaN)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 151); l = emit_byte(buf, l, 192);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    if op == TOKEN_GREATER_EQ {
+        # setae al (0F 93 C0): CF=0 (already false for NaN)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 147); l = emit_byte(buf, l, 192);
+        # movzx rax, al (48 0F B6 C0)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+    l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 192);
+    return l;
+}
+
+fn emit_bin_op_typed(buf: i64, len: i64, op: i64, type_id: i64): i64 {
+    let l = len;
+    if (type_id == TYPE_F64) | (type_id == TYPE_FLOAT_LIT) {
+        # movq xmm0, rax
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+        # movq xmm1, rcx
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 201);
+        if op == TOKEN_PLUS {
+            # addsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 88); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_MINUS {
+            # subsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 92); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_STAR {
+            # mulsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 89); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_SLASH {
+            # divsd xmm0, xmm1
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 94); l = emit_byte(buf, l, 193);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        # Comparison: ucomisd xmm0, xmm1 (66 0F 2E C1)
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 46); l = emit_byte(buf, l, 193);
+        return emit_fp_comparison(buf, l, op);
+    }
+
+    if type_id == TYPE_F32 {
+        # movd xmm0, eax
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+        # movd xmm1, ecx
+        l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 201);
+        if op == TOKEN_PLUS {
+            # addss xmm0, xmm1
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 88); l = emit_byte(buf, l, 193);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_MINUS {
+            # subss xmm0, xmm1
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 92); l = emit_byte(buf, l, 193);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_STAR {
+            # mulss xmm0, xmm1
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 89); l = emit_byte(buf, l, 193);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_SLASH {
+            # divss xmm0, xmm1
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 94); l = emit_byte(buf, l, 193);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        # Comparison: ucomiss xmm0, xmm1 (0F 2E C1)
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 46); l = emit_byte(buf, l, 193);
+        return emit_fp_comparison(buf, l, op);
+    }
+
+    if (type_id == TYPE_I32) | (type_id == TYPE_CHAR) {
+        if op == TOKEN_PLUS  { l = emit_byte(buf, l, 1);  l = emit_byte(buf, l, 200); return l; } # add eax, ecx
+        if op == TOKEN_PLUS_TRAP {
+            l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+            return l;
+        }
+        if op == TOKEN_PLUS_SAT {
+            l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 14);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+            l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+            l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 5);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+            return l;
+        }
+        if op == TOKEN_MINUS { l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 200); return l; } # sub eax, ecx
+        if op == TOKEN_MINUS_TRAP {
+            l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 200);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+            return l;
+        }
+        if op == TOKEN_MINUS_SAT {
+            l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 200);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 14);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+            l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+            l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 5);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+            return l;
+        }
+        if op == TOKEN_STAR  { l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193); return l; } # imul eax, ecx
+        if op == TOKEN_STAR_TRAP {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+            return l;
+        }
+        if op == TOKEN_STAR_SAT {
+            l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+            l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 202);
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193);
+            l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 14);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+            l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 210);
+            l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 5);
+            l = emit_byte(buf, l, 184); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+            return l;
+        }
+        if op == TOKEN_SLASH {
+            # cdq (99); idiv ecx (F7 F9)
+            l = emit_byte(buf, l, 153); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 249);
+            return l;
+        }
+        if op == TOKEN_PERCENT {
+            # cdq; idiv ecx; mov eax, edx (89 D0)
+            l = emit_byte(buf, l, 153); l = emit_byte(buf, l, 247); l = emit_byte(buf, l, 249);
+            l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 208);
+            return l;
+        }
+        if op == TOKEN_AMP { l = emit_byte(buf, l, 33); l = emit_byte(buf, l, 200); return l; } # and eax, ecx
+        if op == TOKEN_PIPE { l = emit_byte(buf, l, 9);  l = emit_byte(buf, l, 200); return l; } # or eax, ecx
+        if op == TOKEN_CARET { l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 200); return l; } # xor eax, ecx
+        if op == TOKEN_SHL { l = emit_byte(buf, l, 211); l = emit_byte(buf, l, 224); return l; } # shl eax, cl
+        if op == TOKEN_SHR { l = emit_byte(buf, l, 211); l = emit_byte(buf, l, 232); return l; } # shr eax, cl
+
+        # 32-bit Comparisons: cmp eax, ecx (39 C8)
+        l = emit_byte(buf, l, 57); l = emit_byte(buf, l, 200);
+        let cc_byte = 148;
+        if op == TOKEN_EQUAL_EQUAL { cc_byte = 148; }
+        if op == TOKEN_NOT_EQUAL   { cc_byte = 149; }
+        if op == TOKEN_LESS        { cc_byte = 156; }
+        if op == TOKEN_GREATER     { cc_byte = 159; }
+        if op == TOKEN_LESS_EQ     { cc_byte = 158; }
+        if op == TOKEN_GREATER_EQ  { cc_byte = 157; }
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, cc_byte); l = emit_byte(buf, l, 192); # setcc al
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192); # movzx rax, al
+        return l;
+    }
+
+    if type_id == TYPE_U8 {
+        if op == TOKEN_PLUS  {
+            l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 200); # add al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192); # movzx rax, al
+            return l;
+        }
+        if op == TOKEN_MINUS {
+            l = emit_byte(buf, l, 40); l = emit_byte(buf, l, 200); # sub al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_STAR {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193); # imul eax, ecx
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192); # movzx rax, al
+            return l;
+        }
+        if op == TOKEN_AMP {
+            l = emit_byte(buf, l, 32); l = emit_byte(buf, l, 200); # and al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_PIPE {
+            l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 200); # or al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_CARET {
+            l = emit_byte(buf, l, 48); l = emit_byte(buf, l, 200); # xor al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+
+        # 8-bit Comparisons: cmp al, cl (38 C8)
+        l = emit_byte(buf, l, 56); l = emit_byte(buf, l, 200);
+        let cc_byte = 148;
+        if op == TOKEN_EQUAL_EQUAL { cc_byte = 148; }
+        if op == TOKEN_NOT_EQUAL   { cc_byte = 149; }
+        if op == TOKEN_LESS        { cc_byte = 156; }
+        if op == TOKEN_GREATER     { cc_byte = 159; }
+        if op == TOKEN_LESS_EQ     { cc_byte = 158; }
+        if op == TOKEN_GREATER_EQ  { cc_byte = 157; }
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, cc_byte); l = emit_byte(buf, l, 192); # setcc al
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192); # movzx rax, al
+        return l;
+    }
+
+    if type_id == TYPE_BOOL {
+        if op == TOKEN_AMP {
+            l = emit_byte(buf, l, 32); l = emit_byte(buf, l, 200); # and al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_PIPE {
+            l = emit_byte(buf, l, 8); l = emit_byte(buf, l, 200); # or al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if op == TOKEN_CARET {
+            l = emit_byte(buf, l, 48); l = emit_byte(buf, l, 200); # xor al, cl
+            l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        # Bool Comparisons: cmp al, cl (38 C8)
+        l = emit_byte(buf, l, 56); l = emit_byte(buf, l, 200);
+        let cc_byte = 148; # sete
+        if op == TOKEN_NOT_EQUAL { cc_byte = 149; } # setne
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, cc_byte); l = emit_byte(buf, l, 192);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+        return l;
+    }
+
+    # TYPE_I64 / TYPE_PTR / default:
+    if op == TOKEN_PLUS {
+        # add rax, rcx (48 01 C8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 1);
+        l = emit_byte(buf, l, 200);
+        return l;
+    }
+    if op == TOKEN_PLUS_TRAP {
+        # add rax, rcx; jno +2; ud2 (48 01 C8 71 02 0F 0B)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+        return l;
+    }
+    if op == TOKEN_PLUS_SAT {
+        # add rax, rcx; jno +25; movabs rax, 0x7FFFFFFFFFFFFFFF; test rcx, rcx; jns +10; movabs rax, 0x8000000000000000
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 1); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 25);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 10);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+        return l;
+    }
+    if op == TOKEN_MINUS {
+        # sub rax, rcx (48 29 C8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 41);
+        l = emit_byte(buf, l, 200);
+        return l;
+    }
+    if op == TOKEN_MINUS_TRAP {
+        # sub rax, rcx; jno +2; ud2 (48 29 C8 71 02 0F 0B)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+        return l;
+    }
+    if op == TOKEN_MINUS_SAT {
+        # sub rax, rcx; jno +25; movabs rax, 0x8000000000000000; test rcx, rcx; jns +10; movabs rax, 0x7FFFFFFFFFFFFFFF
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 41); l = emit_byte(buf, l, 200);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 25);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 201);
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 10);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+        return l;
+    }
+    if op == TOKEN_STAR {
+        # imul rax, rcx (48 0F AF C1)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 175);
+        l = emit_byte(buf, l, 193);
+        return l;
+    }
+    if op == TOKEN_STAR_TRAP {
+        # imul rax, rcx; jno +2; ud2 (48 0F AF C1 71 02 0F 0B)
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 2);
+        l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 11);
+        return l;
+    }
+    if op == TOKEN_STAR_SAT {
+        # mov rdx, rax; xor rdx, rcx; imul rax, rcx; jno +25; movabs rax, 0x7FFFFFFFFFFFFFFF; test rdx, rdx; jns +10; movabs rax, 0x8000000000000000
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 137); l = emit_byte(buf, l, 194);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 49); l = emit_byte(buf, l, 202);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 175); l = emit_byte(buf, l, 193);
+        l = emit_byte(buf, l, 113); l = emit_byte(buf, l, 25);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255);
+        l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 255); l = emit_byte(buf, l, 127);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 133); l = emit_byte(buf, l, 210);
+        l = emit_byte(buf, l, 121); l = emit_byte(buf, l, 10);
+        l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 184);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0);
+        l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 0); l = emit_byte(buf, l, 128);
+        return l;
+    }
+    if op == TOKEN_SLASH {
+        # cqo; idiv rcx (48 99 48 F7 F9)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 153);
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 247);
+        l = emit_byte(buf, l, 249);
+        return l;
+    }
+    if op == TOKEN_PERCENT {
+        # cqo; idiv rcx; mov rax, rdx (48 99 48 F7 F9 48 89 D0)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 153);
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 247);
+        l = emit_byte(buf, l, 249);
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 137);
+        l = emit_byte(buf, l, 208);
+        return l;
+    }
+    if op == TOKEN_AMP {
+        # and rax, rcx (48 21 C8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 33);
+        l = emit_byte(buf, l, 200);
+        return l;
+    }
+    if op == TOKEN_PIPE {
+        # or rax, rcx (48 09 C8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 9);
+        l = emit_byte(buf, l, 200);
+        return l;
+    }
+    if op == TOKEN_CARET {
+        # xor rax, rcx (48 31 C8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 49);
+        l = emit_byte(buf, l, 200);
+        return l;
+    }
+    if op == TOKEN_SHL {
+        # shl rax, cl (48 D3 E0)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 211);
+        l = emit_byte(buf, l, 224);
+        return l;
+    }
+    if op == TOKEN_SHR {
+        # shr rax, cl (48 D3 E8)
+        l = emit_byte(buf, l, 72);
+        l = emit_byte(buf, l, 211);
+        l = emit_byte(buf, l, 232);
+        return l;
+    }
+
+    # Comparisons: cmp rax, rcx (48 39 C8) followed by setcc al; movzx rax, al
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 57);
+    l = emit_byte(buf, l, 200);
+
+    let cc_byte = 148; # sete (0x94)
+    if op == TOKEN_EQUAL_EQUAL { cc_byte = 148; }
+    if op == TOKEN_NOT_EQUAL   { cc_byte = 149; } # setne (0x95)
+    if op == TOKEN_LESS        { cc_byte = 156; } # setl (0x9C)
+    if op == TOKEN_GREATER     { cc_byte = 159; } # setg (0x9F)
+    if op == TOKEN_LESS_EQ     { cc_byte = 158; } # setle (0x9E)
+    if op == TOKEN_GREATER_EQ  { cc_byte = 157; } # setge (0x9D)
+
+    l = emit_byte(buf, l, 15);
+    l = emit_byte(buf, l, cc_byte);
+    l = emit_byte(buf, l, 192); # setcc al (0F cc C0)
+
+    # movzx rax, al (48 0F B6 C0)
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 15);
+    l = emit_byte(buf, l, 182);
+    l = emit_byte(buf, l, 192);
+    return l;
+}
+
+fn emit_cast(buf: i64, len: i64, src_t: i64, dst_t: i64): i64 {
+    let l = len;
+    if src_t == dst_t {
+        return l;
+    }
+    if src_t == TYPE_PTR {
+        if dst_t == TYPE_PTR {
+            return l; # Pointer-to-pointer cast is identity in RAX
+        }
+    }
+
+    if dst_t == TYPE_F64 {
+        if (src_t == TYPE_I64) | (src_t == TYPE_INT_LIT) {
+            # cvtsi2sd xmm0, rax (F2 48 0F 2A C0)
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            # movq rax, xmm0 (66 48 0F 7E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_I32) | (src_t == TYPE_CHAR) {
+            # cvtsi2sd xmm0, eax (F2 0F 2A C0)
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_F32 {
+            # movd xmm0, eax (66 0F 6E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvtss2sd xmm0, xmm0 (F3 0F 5A C0)
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 90); l = emit_byte(buf, l, 192);
+            # movq rax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_U8) | (src_t == TYPE_BOOL) {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+    }
+
+    if dst_t == TYPE_F32 {
+        if (src_t == TYPE_I64) | (src_t == TYPE_INT_LIT) {
+            # cvtsi2ss xmm0, rax (F3 48 0F 2A C0)
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            # movd eax, xmm0 (66 0F 7E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_I32) | (src_t == TYPE_CHAR) {
+            # cvtsi2ss xmm0, eax (F3 0F 2A C0)
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_F64) | (src_t == TYPE_FLOAT_LIT) {
+            # movq xmm0, rax (66 48 0F 6E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvtsd2ss xmm0, xmm0 (F2 0F 5A C0)
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 90); l = emit_byte(buf, l, 192);
+            # movd eax, xmm0
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_U8) | (src_t == TYPE_BOOL) {
+            l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 182); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 42); l = emit_byte(buf, l, 192);
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 126); l = emit_byte(buf, l, 192);
+            return l;
+        }
+    }
+
+    if dst_t == TYPE_I64 {
+        if (src_t == TYPE_F64) | (src_t == TYPE_FLOAT_LIT) {
+            # movq xmm0, rax (66 48 0F 6E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvttsd2si rax, xmm0 (F2 48 0F 2C C0)
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 44); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_F32 {
+            # movd xmm0, eax (66 0F 6E C0)
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvttss2si rax, xmm0 (F3 48 0F 2C C0)
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 44); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if (src_t == TYPE_I32) | (src_t == TYPE_CHAR) {
+            # movsxd rax, eax (48 63 C0)
+            l = emit_byte(buf, l, 72);
+            l = emit_byte(buf, l, 99);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_U8 {
+            # movzx eax, al (0F B6 C0)
+            l = emit_byte(buf, l, 15);
+            l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_BOOL {
+            # movzx eax, al (0F B6 C0)
+            l = emit_byte(buf, l, 15);
+            l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_INT_LIT {
+            return l;
+        }
+    }
+
+    if (dst_t == TYPE_I32) | (dst_t == TYPE_CHAR) {
+        if (src_t == TYPE_F64) | (src_t == TYPE_FLOAT_LIT) {
+            # movq xmm0, rax
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 72); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvttsd2si eax, xmm0 (F2 0F 2C C0)
+            l = emit_byte(buf, l, 242); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 44); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_F32 {
+            # movd xmm0, eax
+            l = emit_byte(buf, l, 102); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 110); l = emit_byte(buf, l, 192);
+            # cvttss2si eax, xmm0 (F3 0F 2C C0)
+            l = emit_byte(buf, l, 243); l = emit_byte(buf, l, 15); l = emit_byte(buf, l, 44); l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_I64 {
+            # movsxd rax, eax (48 63 C0)
+            l = emit_byte(buf, l, 72);
+            l = emit_byte(buf, l, 99);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_INT_LIT {
+            # movsxd rax, eax (48 63 C0)
+            l = emit_byte(buf, l, 72);
+            l = emit_byte(buf, l, 99);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_U8 {
+            # movzx eax, al (0F B6 C0)
+            l = emit_byte(buf, l, 15);
+            l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+        if src_t == TYPE_BOOL {
+            # movzx eax, al (0F B6 C0)
+            l = emit_byte(buf, l, 15);
+            l = emit_byte(buf, l, 182);
+            l = emit_byte(buf, l, 192);
+            return l;
+        }
+    }
+
+    if dst_t == TYPE_U8 {
+        # movzx eax, al (0F B6 C0)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 192);
+        return l;
+    }
+
+    if dst_t == TYPE_BOOL {
+        if (src_t == TYPE_I32) | (src_t == TYPE_CHAR) {
+            # test eax, eax (85 C0)
+            l = emit_byte(buf, l, 133);
+            l = emit_byte(buf, l, 192);
+        } else {
+            if src_t == TYPE_U8 {
+                # test al, al (84 C0)
+                l = emit_byte(buf, l, 132);
+                l = emit_byte(buf, l, 192);
+            } else {
+                # test rax, rax (48 85 C0)
+                l = emit_byte(buf, l, 72);
+                l = emit_byte(buf, l, 133);
+                l = emit_byte(buf, l, 192);
+            }
+        }
+        # setne al (0F 95 C0)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 149);
+        l = emit_byte(buf, l, 192);
+        # movzx eax, al (0F B6 C0)
+        l = emit_byte(buf, l, 15);
+        l = emit_byte(buf, l, 182);
+        l = emit_byte(buf, l, 192);
+        return l;
+    }
+
+    return l;
+}
+
+fn emit_cmp_rax_zero(buf: i64, len: i64): i64 {
+    let l = len;
+    # test rax, rax (48 85 C0) - sets ZF=1 if rax == 0, identical to cmp rax, 0 for following je
+    l = emit_byte(buf, l, 72);
+    l = emit_byte(buf, l, 133);
+    l = emit_byte(buf, l, 192);
+    return l;
+}
+
+fn emit_backpatch32(buf: i64, patch_pos: i64, target_pos: i64): i64 {
+    let disp = target_pos - (patch_pos + 4);
+    let _pd = &disp;
+    let n = disp;
+    let _pn = &n;
+    if n < 0 { n = n + 4294967296; }
+    set_byte(buf, patch_pos, n % 256);
+    set_byte(buf, patch_pos + 1, (n / 256) % 256);
+    set_byte(buf, patch_pos + 2, (n / 65536) % 256);
+    set_byte(buf, patch_pos + 3, (n / 16777216) % 256);
+    return 0;
+}

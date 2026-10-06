@@ -1,0 +1,109 @@
+use std.collections;
+
+fn test_vector(): i64 {
+    let v = vec_new(4);
+    if vec_len(v) != 0 { return 1; }
+    if vec_cap(v) != 4 { return 2; }
+
+    vec_push(v, 10);
+    vec_push(v, 20);
+    vec_push(v, 30);
+    vec_push(v, 40);
+
+    # This push triggers dynamic reallocation (cap: 4 -> 8)
+    vec_push(v, 50);
+
+    if vec_len(v) != 5 { return 3; }
+    if vec_cap(v) < 8 { return 4; }
+
+    # Indexing access
+    if vec_get(v, 0) != 10 { return 5; }
+    if vec_get(v, 1) != 20 { return 6; }
+    if vec_get(v, 2) != 30 { return 7; }
+    if vec_get(v, 3) != 40 { return 8; }
+    if vec_get(v, 4) != 50 { return 9; }
+
+    # Mutation
+    vec_set(v, 1, 999);
+    if vec_get(v, 1) != 999 { return 10; }
+
+    # Bounds check verification
+    if vec_get(v, -1) != -999999999 { return 11; }
+    if vec_get(v, 100) != -999999999 { return 12; }
+
+    return 0;
+}
+
+fn test_dyn_string(): i64 {
+    let s = str_new(8);
+    str_append(s, "Hello");
+    str_append(s, ", Rubix!");
+
+    if str_len(s) != 13 { return 21; }
+
+    # Indexing access: 'H' is ASCII 72
+    if str_get_byte(s, 0) != 72 { return 22; }
+    # ',' is ASCII 44
+    if str_get_byte(s, 5) != 44 { return 23; }
+    # '!' is ASCII 33
+    if str_get_byte(s, 12) != 33 { return 24; }
+
+    if str_equals(s, "Hello, Rubix!") == false { return 25; }
+    if str_equals(s, "Different") == true { return 26; }
+
+    return 0;
+}
+
+fn test_hash_map(): i64 {
+    let m = map_new(16);
+
+    # Key / value insertions
+    map_put(m, 101, 5555);
+    map_put(m, 202, 6666);
+    map_put(m, 303, 7777);
+
+    if map_len(m) != 3 { return 31; }
+
+    # Lookups
+    if map_get(m, 101) != 5555 { return 32; }
+    if map_get(m, 202) != 6666 { return 33; }
+    if map_get(m, 303) != 7777 { return 34; }
+
+    # Existence testing
+    if map_has(m, 101) == false { return 35; }
+    if map_has(m, 202) == false { return 36; }
+    if map_has(m, 999) == true { return 37; } # Non-existent key
+
+    # In-place update
+    map_put(m, 101, 9999);
+    if map_get(m, 101) != 9999 { return 38; }
+    if map_len(m) != 3 { return 39; } # Count should remain 3
+
+    return 0;
+}
+
+fn main(): i64 {
+    let r_vec = test_vector();
+    if r_vec != 0 {
+        print "FAIL: test_vector returned ";
+        print r_vec;
+        return 1;
+    }
+
+    let r_str = test_dyn_string();
+    if r_str != 0 {
+        print "FAIL: test_dyn_string returned ";
+        print r_str;
+        return 2;
+    }
+
+    let r_map = test_hash_map();
+    if r_map != 0 {
+        print "FAIL: test_hash_map returned ";
+        print r_map;
+        return 3;
+    }
+
+    print "PASS: Dynamic Vector, Dynamic String, and Hash Map verified natively.";
+    return 0;
+}

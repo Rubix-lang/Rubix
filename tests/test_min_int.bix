@@ -1,0 +1,13 @@
+fn main(): Integer {
+    let min_val = -9223372036854775807 - 1
+    let s = int_to_string(min_val)
+    print "Pointer s:"
+    print s
+    print "Is string:"
+    # In Rubix, let's see byte_at(s, 0)
+    print "First byte:"
+    print byte_at(s, 0)
+    print "Length:"
+    print string_length(s)
+    0
+}

@@ -1,0 +1,696 @@
+# lexer.bix - streaming tokenizer over source buffers
+
+
+fn is_digit(b: i64): i64 {
+    if b >= 48 {
+        if b <= 57 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn is_alpha(b: i64): i64 {
+    if b >= 65 {
+        if b <= 90 {
+            return 1;
+        }
+    }
+    if b >= 97 {
+        if b <= 122 {
+            return 1;
+        }
+    }
+    if b == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+
+
+fn parse_float_bits(src: i64, start: i64, tok_len: i64): i64 {
+    let p = start;
+    let end = start + tok_len;
+    let int_part = 0;
+    while p < end {
+        let b = get_byte(src, p);
+        if b == 46 { # '.'
+            p = p + 1;
+            let frac_part = 0;
+            let frac_digits = 0;
+            while p < end {
+                let fb = get_byte(src, p);
+                if (fb >= 48) & (fb <= 57) {
+                    if frac_digits < 9 {
+                        frac_part = frac_part * 10 + (fb - 48);
+                        frac_digits = frac_digits + 1;
+                    }
+                }
+                p = p + 1;
+            }
+            if (int_part == 0) & (frac_part == 0) {
+                return 0;
+            }
+            let scale = 1;
+            let i = 0;
+            while i < frac_digits {
+                scale = scale * 10;
+                i = i + 1;
+            }
+            let num = int_part * scale + frac_part;
+            let e = 0;
+            while num >= (2 * scale) {
+                scale = scale * 2;
+                e = e + 1;
+            }
+            while num < scale {
+                num = num * 2;
+                e = e - 1;
+            }
+            let exp_biased = e + 1023;
+            let r = num - scale;
+            let mantissa = 0;
+            let bit_i = 0;
+            while bit_i < 54 {
+                r = r * 2;
+                if r >= scale {
+                    mantissa = (mantissa * 2) | 1;
+                    r = r - scale;
+                } else {
+                    mantissa = mantissa * 2;
+                }
+                bit_i = bit_i + 1;
+            }
+            let round_bit = (mantissa >> 1) & 1;
+            let top52 = mantissa >> 2;
+            if round_bit == 1 {
+                top52 = top52 + 1;
+                if top52 >= 4503599627370496 { # 1 << 52
+                    top52 = 0;
+                    exp_biased = exp_biased + 1;
+                }
+            }
+            let bits = (exp_biased << 52) | top52;
+            return bits;
+        } else {
+            if (b >= 48) & (b <= 57) {
+                int_part = int_part * 10 + (b - 48);
+            }
+            p = p + 1;
+        }
+    }
+    return 0;
+}
+
+fn scan_token(src: i64, pos: i64, len: i64, tok_buf: i64): i64 {
+    let p = pos;
+    let running = 1;
+    while running == 1 {
+        if p >= len {
+            running = 0;
+        } else {
+            let b_ws = get_byte(src, p);
+            let is_ws = 0;
+            if b_ws == 32 { is_ws = 1; }
+            if b_ws == 9  { is_ws = 1; }
+            if b_ws == 10 { is_ws = 1; }
+            if b_ws == 13 { is_ws = 1; }
+            if is_ws == 1 {
+                p = p + 1;
+            } else {
+                if b_ws == 35 { # '#' comment
+                    let in_comment = 1;
+                    while in_comment == 1 {
+                        if p >= len {
+                            in_comment = 0;
+                        } else {
+                            let cb = get_byte(src, p);
+                            p = p + 1;
+                            if cb == 10 {
+                                in_comment = 0;
+                            }
+                        }
+                    }
+                } else {
+                    if b_ws == 47 { # possible '//' comment
+                        if p + 1 < len {
+                            if get_byte(src, p + 1) == 47 {
+                                p = p + 2;
+                                let in_comment2 = 1;
+                                while in_comment2 == 1 {
+                                    if p >= len {
+                                        in_comment2 = 0;
+                                    } else {
+                                        let cb2 = get_byte(src, p);
+                                        p = p + 1;
+                                        if cb2 == 10 {
+                                            in_comment2 = 0;
+                                        }
+                                    }
+                                }
+                            } else {
+                                running = 0;
+                            }
+                        } else {
+                            running = 0;
+                        }
+                    } else {
+                        running = 0;
+                    }
+                }
+            }
+        }
+    }
+    if p >= len {
+        token_set(tok_buf, TOKEN_EOF, 0, p, 0);
+        return p;
+    }
+
+    let b = get_byte(src, p);
+
+    # String Literal
+    if b == 34 { # '"'
+        p = p + 1;
+        let start = p;
+        let scanning = 1;
+        let err = 0;
+        while scanning == 1 {
+            if p >= len {
+                scanning = 0;
+                err = 1; # Unterminated string (reached EOF)
+            } else {
+                let sb = get_byte(src, p);
+                if sb == 10 { # Unescaped newline in string literal is an error
+                    scanning = 0;
+                    err = 1;
+                } else {
+                    if sb == 34 { # '"'
+                        scanning = 0; # Done
+                    } else {
+                        if sb == 92 { # '\' escape
+                            p = p + 1;
+                            if p >= len {
+                                scanning = 0;
+                                err = 1; # Trailing backslash at EOF
+                            } else {
+                                let esc = get_byte(src, p);
+                                if esc == 110 { # 'n'
+                                    p = p + 1;
+                                } else {
+                                    if esc == 116 { # 't'
+                                        p = p + 1;
+                                    } else {
+                                        if esc == 114 { # 'r'
+                                            p = p + 1;
+                                        } else {
+                                            if esc == 48 { # '0'
+                                                p = p + 1;
+                                            } else {
+                                                if esc == 92 { # '\\'
+                                                    p = p + 1;
+                                                } else {
+                                                    if esc == 34 { # '\"'
+                                                        p = p + 1;
+                                                    } else {
+                                                        # Invalid escape sequence!
+                                                        scanning = 0;
+                                                        err = 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            p = p + 1;
+                        }
+                    }
+                }
+            }
+        }
+        if err == 1 {
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+        let tok_len = p - start;
+        p = p + 1; # skip closing quote
+        token_set(tok_buf, TOKEN_STR_LIT, 0, start, tok_len);
+        return p;
+    }
+
+    # Character Literal
+    if b == 39 {
+        let start = p;
+        p = p + 1; # skip opening quote
+        if p >= len {
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+
+        let cb = get_byte(src, p);
+        if (cb == 39) | (cb == 10) {
+            # Empty character literal or unescaped newline
+            if cb == 39 { p = p + 1; }
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+
+        let ch_val = 0;
+        let is_valid = 1;
+        p = p + 1;
+
+        if cb == 92 { # escape
+            if p >= len {
+                token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+                return p;
+            }
+            let esc = get_byte(src, p);
+            p = p + 1;
+            if esc == 110 {
+                ch_val = 10; # newline
+            } else {
+                if esc == 114 {
+                    ch_val = 13; # carriage return
+                } else {
+                    if esc == 116 {
+                        ch_val = 9;  # tab
+                    } else {
+                        if esc == 48 {
+                            ch_val = 0;  # null
+                        } else {
+                            if esc == 92 {
+                                ch_val = 92; # backslash
+                            } else {
+                                if esc == 39 {
+                                    ch_val = 39; # single quote
+                                } else {
+                                    is_valid = 0; # Unknown escape sequence
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            ch_val = cb;
+        }
+
+        if is_valid == 0 {
+            # Unknown escape sequence - consume until closing quote or newline/EOF
+            let seeking_esc = 1;
+            while seeking_esc == 1 {
+                if p >= len {
+                    seeking_esc = 0;
+                } else {
+                    let nb = get_byte(src, p);
+                    p = p + 1;
+                    if (nb == 39) | (nb == 10) {
+                        seeking_esc = 0;
+                    }
+                }
+            }
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+
+        # Check closing quote
+        if p >= len {
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+
+        if get_byte(src, p) != 39 {
+            # Multi-character literal or missing closing quote
+            let seeking_end = 1;
+            while seeking_end == 1 {
+                if p >= len {
+                    seeking_end = 0;
+                } else {
+                    let mb = get_byte(src, p);
+                    p = p + 1;
+                    if (mb == 39) | (mb == 10) {
+                        seeking_end = 0;
+                    }
+                }
+            }
+            token_set(tok_buf, TOKEN_ERROR, 0, start, p - start);
+            return p;
+        }
+
+        p = p + 1; # skip closing quote
+        let tok_len = p - start;
+        token_set(tok_buf, TOKEN_CHAR_LIT, ch_val, start, tok_len);
+        return p;
+    }
+
+    # Integer or Float Literal
+    if is_digit(b) == 1 {
+        let start = p;
+        let val = 0;
+        let scanning = 1;
+        while scanning == 1 {
+            if p >= len {
+                scanning = 0;
+            } else {
+                let db = get_byte(src, p);
+                if is_digit(db) == 1 {
+                    val = val * 10 + (db - 48);
+                    p = p + 1;
+                } else {
+                    scanning = 0;
+                }
+            }
+        }
+        let is_float = 0;
+        if p < len {
+            if get_byte(src, p) == 46 { # '.'
+                let is_range = 0;
+                if p + 1 < len {
+                    if get_byte(src, p + 1) == 46 { # '..'
+                        is_range = 1;
+                    }
+                }
+                if is_range == 0 {
+                    if p + 1 < len {
+                        if is_digit(get_byte(src, p + 1)) == 1 {
+                            is_float = 1;
+                            p = p + 1; # skip '.'
+                            while (p < len) & (is_digit(get_byte(src, p)) == 1) {
+                                p = p + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let tok_len = p - start;
+        if is_float == 1 {
+            let fval = parse_float_bits(src, start, tok_len);
+            token_set(tok_buf, TOKEN_FLOAT_LIT, fval, start, tok_len);
+        } else {
+            token_set(tok_buf, TOKEN_INT_LIT, val, start, tok_len);
+        }
+        return p;
+    }
+
+    # Identifier or Keyword
+    if is_alpha(b) == 1 {
+        let start = p;
+        let scanning = 1;
+        while scanning == 1 {
+            if p >= len {
+                scanning = 0;
+            } else {
+                let ab = get_byte(src, p);
+                let is_an = is_alpha(ab);
+                if is_an == 0 {
+                    is_an = is_digit(ab);
+                }
+                if is_an == 1 {
+                    p = p + 1;
+                } else {
+                    scanning = 0;
+                }
+            }
+        }
+        let tok_len = p - start;
+        let kind = TOKEN_IDENT;
+
+        if tok_len == 1 {
+            let b0 = get_byte(src, start);
+            if b0 == 95 { kind = TOKEN_UNDERSCORE; } # '_'
+        }
+        if tok_len == 2 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            if b0 == 102 { if b1 == 110 { kind = TOKEN_KW_FN; } }    # fn
+            if b0 == 105 { if b1 == 102 { kind = TOKEN_KW_IF; } }    # if
+            if b0 == 117 { if b1 == 56  { kind = TOKEN_TYPE_U8; } }  # u8
+            if b0 == 97  { if b1 == 115 { kind = TOKEN_KW_AS; } }    # as
+            if b0 == 111 { if b1 == 114 { kind = TOKEN_KW_OR; } }    # or
+        }
+        if tok_len == 3 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            if b0 == 108 { if b1 == 101 { if b2 == 116 { kind = TOKEN_KW_LET; } } }   # let
+            if b0 == 109 { if b1 == 117 { if b2 == 116 { kind = TOKEN_KW_MUT; } } }   # mut
+            if (b0 == 73) | (b0 == 105) { if b1 == 110 { if b2 == 116 { kind = TOKEN_TYPE_I64; } } } # Int / int
+            if b0 == 105 { if b1 == 54  { if b2 == 52  { kind = TOKEN_TYPE_I64; } } } # i64
+            if b0 == 105 { if b1 == 51  { if b2 == 50  { kind = TOKEN_TYPE_I32; } } } # i32
+            if b0 == 102 { if b1 == 54  { if b2 == 52  { kind = TOKEN_TYPE_F64; } } } # f64
+            if b0 == 102 { if b1 == 51  { if b2 == 50  { kind = TOKEN_TYPE_F32; } } } # f32
+            if b0 == 112 { if b1 == 116 { if b2 == 114 { kind = TOKEN_TYPE_PTR; } } } # ptr
+            if b0 == 115 { if b1 == 116 { if b2 == 114 { kind = TOKEN_TYPE_STR; } } } # str
+            if b0 == 102 { if b1 == 111 { if b2 == 114 { kind = TOKEN_KW_FOR; } } }   # for
+        }
+        if tok_len == 4 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            let b3 = get_byte(src, start + 3);
+            if b0 == 108 { if b1 == 111 { if b2 == 111 { if b3 == 112 { kind = TOKEN_KW_WHILE; } } } } # loop
+            if b0 == 101 { if b1 == 108 { if b2 == 115 { if b3 == 101 { kind = TOKEN_KW_ELSE; } } } }    # else
+            if b0 == 98  { if b1 == 111 { if b2 == 111 { if b3 == 108 { kind = TOKEN_TYPE_BOOL; } } } }  # bool
+            if b0 == 99  { if b1 == 104 { if b2 == 97  { if b3 == 114 { kind = TOKEN_TYPE_CHAR; } } } }  # char
+            if (b0 == 86) | (b0 == 118) { if b1 == 111 { if b2 == 105 { if b3 == 100 { kind = TOKEN_TYPE_VOID; } } } }  # Void / void
+            if b0 == 116 { if b1 == 114 { if b2 == 117 { if b3 == 101 { kind = TOKEN_KW_TRUE; } } } }   # true
+            if b0 == 110 { if b1 == 117 { if b2 == 108 { if b3 == 108 { kind = TOKEN_KW_NULL; } } } }   # null
+            if b0 == 101 { if b1 == 110 { if b2 == 117 { if b3 == 109 { kind = TOKEN_KW_ENUM; } } } }   # enum
+            if b0 == 116 { if b1 == 121 { if b2 == 112 { if b3 == 101 { kind = TOKEN_KW_TYPE; } } } }   # type
+        }
+        if tok_len == 5 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            let b3 = get_byte(src, start + 3);
+            let b4 = get_byte(src, start + 4);
+            if (b0 == 70) | (b0 == 102) { if b1 == 108 { if b2 == 111 { if b3 == 97 { if b4 == 116 { kind = TOKEN_TYPE_F64; } } } } } # Float
+            if b0 == 119 { if b1 == 104 { if b2 == 105 { if b3 == 108 { if b4 == 101 { kind = TOKEN_KW_WHILE; } } } } } # while
+            if b0 == 102 { if b1 == 97  { if b2 == 108 { if b3 == 115 { if b4 == 101 { kind = TOKEN_KW_FALSE; } } } } } # false
+            if b0 == 98  { if b1 == 114 { if b2 == 101 { if b3 == 97  { if b4 == 107 { kind = TOKEN_KW_BREAK; } } } } } # break
+            if b0 == 109 { if b1 == 97  { if b2 == 116 { if b3 == 99  { if b4 == 104 { kind = TOKEN_KW_MATCH; } } } } } # match
+            if b0 == 100 { if b1 == 101 { if b2 == 102 { if b3 == 101 { if b4 == 114 { kind = TOKEN_KW_DEFER; } } } } } # defer
+            if b0 == 99  { if b1 == 111 { if b2 == 110 { if b3 == 115 { if b4 == 116 { kind = TOKEN_KW_CONST; } } } } } # const
+        }
+        if tok_len == 6 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            let b3 = get_byte(src, start + 3);
+            let b4 = get_byte(src, start + 4);
+            let b5 = get_byte(src, start + 5);
+            if (b0 == 83) | (b0 == 115) { if b1 == 116 { if b2 == 114 { if b3 == 105 { if b4 == 110 { if b5 == 103 { kind = TOKEN_TYPE_STR; } } } } } } # String / string
+            if b0 == 114 { if b1 == 101 { if b2 == 116 { if b3 == 117 { if b4 == 114 { if b5 == 110 { kind = TOKEN_KW_RETURN; } } } } } } # return
+            if b0 == 115 { if b1 == 116 { if b2 == 114 { if b3 == 117 { if b4 == 99  { if b5 == 116 { kind = TOKEN_KW_STRUCT; } } } } } } # struct
+        }
+        if tok_len == 7 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            let b3 = get_byte(src, start + 3);
+            let b4 = get_byte(src, start + 4);
+            let b5 = get_byte(src, start + 5);
+            let b6 = get_byte(src, start + 6);
+            if (b0 == 73) | (b0 == 105) { if b1 == 110 { if b2 == 116 { if b3 == 101 { if b4 == 103 { if b5 == 101 { if b6 == 114 { kind = TOKEN_TYPE_I64; } } } } } } } # Integer / integer
+            if (b0 == 66) | (b0 == 98) { if b1 == 111 { if b2 == 111 { if b3 == 108 { if b4 == 101 { if b5 == 97 { if b6 == 110 { kind = TOKEN_TYPE_BOOL; } } } } } } } # Boolean / boolean
+        }
+        if tok_len == 8 {
+            let b0 = get_byte(src, start);
+            let b1 = get_byte(src, start + 1);
+            let b2 = get_byte(src, start + 2);
+            let b3 = get_byte(src, start + 3);
+            let b4 = get_byte(src, start + 4);
+            let b5 = get_byte(src, start + 5);
+            let b6 = get_byte(src, start + 6);
+            let b7 = get_byte(src, start + 7);
+            if b0 == 99 { if b1 == 111 { if b2 == 110 { if b3 == 116 { if b4 == 105 { if b5 == 110 { if b6 == 117 { if b7 == 101 { kind = TOKEN_KW_CONTINUE; } } } } } } } } # continue
+        }
+
+        token_set(tok_buf, kind, 0, start, tok_len);
+        return p;
+    }
+
+    # Punctuators and single characters
+    p = p + 1;
+    if b == 40  { token_set(tok_buf, TOKEN_LPAREN, 0, p - 1, 1); return p; } # '('
+    if b == 41  { token_set(tok_buf, TOKEN_RPAREN, 0, p - 1, 1); return p; } # ')'
+    if b == 123 { token_set(tok_buf, TOKEN_LBRACE, 0, p - 1, 1); return p; } # '{'
+    if b == 125 { token_set(tok_buf, TOKEN_RBRACE, 0, p - 1, 1); return p; } # '}'
+    if b == 58  { token_set(tok_buf, TOKEN_COLON, 0, p - 1, 1); return p; }  # ':'
+    if b == 59  { token_set(tok_buf, TOKEN_SEMICOLON, 0, p - 1, 1); return p; } # ';'
+    if b == 46 { # '.' or '..'
+        if p < len {
+            if get_byte(src, p) == 46 { # '..'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_DOT_DOT, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_DOT, 0, p - 1, 1);
+        return p;
+    }
+    if b == 43 { # '+', '+!', or '+|'
+        if p < len {
+            let nb = get_byte(src, p);
+            if nb == 33 { # '+!'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_PLUS_TRAP, 0, p - 2, 2);
+                return p;
+            }
+            if nb == 124 { # '+|'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_PLUS_SAT, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_PLUS, 0, p - 1, 1);
+        return p;
+    }
+    if b == 45 { # '-', '-!', or '-|'
+        if p < len {
+            let nb = get_byte(src, p);
+            if nb == 33 { # '-!'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_MINUS_TRAP, 0, p - 2, 2);
+                return p;
+            }
+            if nb == 124 { # '-|'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_MINUS_SAT, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_MINUS, 0, p - 1, 1);
+        return p;
+    }
+    if b == 42 { # '*', '*!', or '*|'
+        if p < len {
+            let nb = get_byte(src, p);
+            if nb == 33 { # '*!'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_STAR_TRAP, 0, p - 2, 2);
+                return p;
+            }
+            if nb == 124 { # '*|'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_STAR_SAT, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_STAR, 0, p - 1, 1);
+        return p;
+    }
+    if b == 47  { token_set(tok_buf, TOKEN_SLASH, 0, p - 1, 1); return p; }  # '/'
+    if b == 37  { token_set(tok_buf, TOKEN_PERCENT, 0, p - 1, 1); return p; } # '%'
+    if b == 44  { token_set(tok_buf, TOKEN_COMMA, 0, p - 1, 1); return p; }  # ','
+    if b == 38  { token_set(tok_buf, TOKEN_AMP, 0, p - 1, 1); return p; }    # '&'
+    if b == 124 { # '|' or '|>'
+        if p < len {
+            if get_byte(src, p) == 62 { # '|>'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_PIPE_GREATER, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_PIPE, 0, p - 1, 1);
+        return p;
+    }
+    if b == 63 { # '?', '?:', '?.', '??'
+        if p < len {
+            let next_b = get_byte(src, p);
+            if next_b == 58 { # '?:'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_QUESTION_COLON, 0, p - 2, 2);
+                return p;
+            }
+            if next_b == 46 { # '?.'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_QUESTION_DOT, 0, p - 2, 2);
+                return p;
+            }
+            if next_b == 63 { # '??'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_QUESTION_QUESTION, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_QUESTION, 0, p - 1, 1);
+        return p;
+    }
+    if b == 94  { token_set(tok_buf, TOKEN_CARET, 0, p - 1, 1); return p; }  # '^'
+    if b == 91  { token_set(tok_buf, TOKEN_LBRACKET, 0, p - 1, 1); return p; } # '['
+    if b == 93  { token_set(tok_buf, TOKEN_RBRACKET, 0, p - 1, 1); return p; } # ']'
+    if b == 126 { token_set(tok_buf, TOKEN_TILDE, 0, p - 1, 1); return p; }    # '~'
+
+    if b == 60 { # '<', '<=', or '<<'
+        if p < len {
+            let nb = get_byte(src, p);
+            if nb == 60 { # '<<'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_SHL, 0, p - 2, 2);
+                return p;
+            }
+            if nb == 61 { # '<='
+                p = p + 1;
+                token_set(tok_buf, TOKEN_LESS_EQ, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_LESS, 0, p - 1, 1);
+        return p;
+    }
+
+    if b == 62 { # '>', '>=', or '>>'
+        if p < len {
+            let nb2 = get_byte(src, p);
+            if nb2 == 62 { # '>>'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_SHR, 0, p - 2, 2);
+                return p;
+            }
+            if nb2 == 61 { # '>='
+                p = p + 1;
+                token_set(tok_buf, TOKEN_GREATER_EQ, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_GREATER, 0, p - 1, 1);
+        return p;
+    }
+
+    if b == 61 { # '=' or '==' or '=>'
+        if p < len {
+            let nb3 = get_byte(src, p);
+            if nb3 == 61 {
+                p = p + 1;
+                token_set(tok_buf, TOKEN_EQUAL_EQUAL, 0, p - 2, 2);
+                return p;
+            }
+            if nb3 == 62 { # '=>'
+                p = p + 1;
+                token_set(tok_buf, TOKEN_FAT_ARROW, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_EQUAL, 0, p - 1, 1);
+        return p;
+    }
+
+    if b == 33 { # '!' or '!='
+        if p < len {
+            if get_byte(src, p) == 61 {
+                p = p + 1;
+                token_set(tok_buf, TOKEN_NOT_EQUAL, 0, p - 2, 2);
+                return p;
+            }
+        }
+        token_set(tok_buf, TOKEN_BANG, 0, p - 1, 1);
+        return p;
+    }
+
+    token_set(tok_buf, TOKEN_ERROR, 0, p - 1, 1);
+    return p;
+}

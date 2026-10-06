@@ -1,0 +1,14 @@
+# Test char_at negative index
+fn main(): Integer {
+    let s = "hello"
+    let c1 = char_at(s, 1)
+    print "Extracted index 1 char byte (should be 101 'e'):"
+    print byte_at(c1, 0)
+    let c2 = char_at(s, -1)
+    print "char_at(-1) length (should be 0):"
+    print string_length(c2)
+    let c3 = char_at(s, 10)
+    print "char_at(10) length (should be 0):"
+    print string_length(c3)
+    0
+}

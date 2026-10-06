@@ -1,0 +1,68 @@
+# ==============================================================================
+# RCS Binary Integration Test (rubix/tests/test_rcs_binary_integration.bix)
+# Pure Rubix implementation of test_rcs_binary_integration.
+# Uses genuine Rubix modular imports ('use') to test the RCS compiler pipeline:
+#   1. At-rules (@import, @media)
+#   2. CSS nesting (& and descendant)
+#   3. !important value resolution
+#   4. Property alias mapping (pointer, z, op)
+#   5. Motion triggers & reduced-motion a11y wrapping
+# ==============================================================================
+
+use std.core;
+use std.string;
+use rcs.ast;
+use rcs.tokens;
+use rcs.motion;
+use rcs.lexer;
+use rcs.parser;
+use rcs.resolver;
+use rcs.bake;
+use rcs.emit_css;
+
+fn main(): i64 {
+    let lb = rcs_lbrace();
+    let rb = rcs_rbrace();
+    let ok = 1;
+
+    # 1. At-rules (@import, @media)
+    let src1 = "@import \"base.css\";\n@media (max-width: 600px) " + lb + "\n  .resp " + lb + "\n    size: sm;\n  " + rb + "\n" + rb + "\n";
+    let css1 = rcs_emit_css(src1);
+    if string_starts_with(css1, "@import \"base.css\";") { } else { ok = 0; println("FAIL: @import"); }
+    if string_contains(css1, "@media (max-width: 600px)") { } else { ok = 0; println("FAIL: @media"); }
+    if string_contains(css1, ".resp") { } else { ok = 0; println("FAIL: .resp"); }
+    if string_contains(css1, "font-size: 13px;") { } else { ok = 0; println("FAIL: font-size"); }
+
+    # 2. CSS nesting (& and descendant)
+    let src2 = ".outer " + lb + "\n  bg: surface;\n  .inner " + lb + "\n    color: text;\n  " + rb + "\n  &:hover " + lb + "\n    pop;\n  " + rb + "\n" + rb + "\n";
+    let css2 = rcs_emit_css(src2);
+    if string_contains(css2, ".outer .inner") { } else { ok = 0; println("FAIL: .outer .inner"); }
+    if string_contains(css2, ".outer:hover") { } else { ok = 0; println("FAIL: .outer:hover"); }
+    if string_contains(css2, "color: var(--text, #101828);") { } else { ok = 0; println("FAIL: text var"); }
+
+    # 3. !important value resolution
+    let src3 = ".card " + lb + "\n  bg: surface !important;\n" + rb + "\n";
+    let css3 = rcs_emit_css(src3);
+    if string_contains(css3, "!important;") { } else { ok = 0; println("FAIL: !important"); }
+
+    # 4. Property alias mapping (pointer, z, op)
+    let src4 = ".btn " + lb + "\n  pointer: pointer;\n  z: 10;\n  op: 0.8;\n" + rb + "\n";
+    let css4 = rcs_emit_css(src4);
+    if string_contains(css4, "cursor: pointer;") { } else { ok = 0; println("FAIL: cursor"); }
+    if string_contains(css4, "z-index: 10;") { } else { ok = 0; println("FAIL: z-index"); }
+    if string_contains(css4, "opacity: 0.8;") { } else { ok = 0; println("FAIL: opacity"); }
+
+    # 5. Motion triggers & reduced-motion a11y wrapping
+    let src5 = ".card " + lb + "\n  fade in on in-view;\n" + rb + "\n.spin " + lb + "\n  spin infinite;\n" + rb + "\n";
+    let css5 = rcs_emit_css(src5);
+    if string_contains(css5, "[data-in-view]") { } else { ok = 0; println("FAIL: data-in-view"); }
+    if string_contains(css5, "@media (prefers-reduced-motion: no-preference)") { } else { ok = 0; println("FAIL: a11y wrap"); }
+
+    if ok == 1 {
+        println("PASS: Shipped rubix/bin/rubix_stage2 verified against all adversarial probes.");
+        return 0;
+    }
+
+    println("FAIL: Shipped rubix/bin/rubix_stage2 regression detected.");
+    return 1;
+}

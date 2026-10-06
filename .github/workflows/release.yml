@@ -1,0 +1,186 @@
+name: Release Rubix & Rix Toolchain
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: macos-arm64
+            os: macos-14
+            archive: tar.gz
+          - target: macos-x86_64
+            os: macos-13
+            archive: tar.gz
+          - target: windows-x64
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential binutils gcc tar gzip zip
+
+      - name: Setup macOS toolchain
+        if: runner.os == 'macOS'
+        run: |
+          brew install coreutils 2>/dev/null || true
+
+      - name: Setup Windows toolchain
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            zip
+
+      - name: Determine Version
+        id: get_version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build & Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          DIST_DIR="rubix-${VERSION}-${{ matrix.target }}"
+          
+          # Navigate to rubix root if nested or top-level
+          if [ -d "rubix" ]; then
+            cd rubix
+          fi
+
+          # Bootstrap native compiler
+          if [ -f "scripts/selfhost.sh" ]; then
+            bash scripts/selfhost.sh || true
+          fi
+
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p "${DIST_DIR}/bin" "${DIST_DIR}/runtime" "${DIST_DIR}/std" "${DIST_DIR}/examples" "${DIST_DIR}/docs"
+
+          # Copy rubix compiler and driver
+          if [ -d "rubix" ]; then
+            cp -a rubix/bin/rubix rubix/bin/rubixc "${DIST_DIR}/bin/" 2>/dev/null || true
+            cp -a rubix/runtime/* "${DIST_DIR}/runtime/" 2>/dev/null || true
+            cp -a rubix/std/* "${DIST_DIR}/std/" 2>/dev/null || true
+            cp -a rubix/examples/* "${DIST_DIR}/examples/" 2>/dev/null || true
+            cp -a rubix/docs/* "${DIST_DIR}/docs/" 2>/dev/null || true
+            cp -a rubix/LICENSE rubix/README.md "${DIST_DIR}/" 2>/dev/null || true
+          else
+            cp -a bin/rubix bin/rubixc "${DIST_DIR}/bin/" 2>/dev/null || true
+            cp -a runtime/* "${DIST_DIR}/runtime/" 2>/dev/null || true
+            cp -a std/* "${DIST_DIR}/std/" 2>/dev/null || true
+            cp -a examples/* "${DIST_DIR}/examples/" 2>/dev/null || true
+            cp -a docs/* "${DIST_DIR}/docs/" 2>/dev/null || true
+            cp -a LICENSE README.md "${DIST_DIR}/" 2>/dev/null || true
+          fi
+
+          # Include Rix package manager & executor
+          if [ -d "rix" ]; then
+            cp -a rix/bin/rix "${DIST_DIR}/bin/" 2>/dev/null || true
+          fi
+
+          chmod +x "${DIST_DIR}/bin/"* 2>/dev/null || true
+
+          # Create distribution archive
+          tar -czvf "${DIST_DIR}.tar.gz" "${DIST_DIR}"
+          sha256sum "${DIST_DIR}.tar.gz" > "${DIST_DIR}.tar.gz.sha256"
+
+      - name: Build & Package (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          DIST_DIR="rubix-${VERSION}-${{ matrix.target }}"
+          
+          mkdir -p "${DIST_DIR}/bin" "${DIST_DIR}/runtime" "${DIST_DIR}/std" "${DIST_DIR}/examples" "${DIST_DIR}/docs"
+          
+          if [ -d "rubix" ]; then
+            cp -a rubix/bin/* "${DIST_DIR}/bin/" 2>/dev/null || true
+            cp -a rubix/runtime/* "${DIST_DIR}/runtime/" 2>/dev/null || true
+            cp -a rubix/std/* "${DIST_DIR}/std/" 2>/dev/null || true
+            cp -a rubix/examples/* "${DIST_DIR}/examples/" 2>/dev/null || true
+            cp -a rubix/docs/* "${DIST_DIR}/docs/" 2>/dev/null || true
+            cp -a rubix/LICENSE rubix/README.md "${DIST_DIR}/" 2>/dev/null || true
+          else
+            cp -a bin/* "${DIST_DIR}/bin/" 2>/dev/null || true
+            cp -a runtime/* "${DIST_DIR}/runtime/" 2>/dev/null || true
+            cp -a std/* "${DIST_DIR}/std/" 2>/dev/null || true
+            cp -a examples/* "${DIST_DIR}/examples/" 2>/dev/null || true
+            cp -a docs/* "${DIST_DIR}/docs/" 2>/dev/null || true
+            cp -a LICENSE README.md "${DIST_DIR}/" 2>/dev/null || true
+          fi
+
+          if [ -d "rix" ]; then
+            cp -a rix/bin/rix "${DIST_DIR}/bin/" 2>/dev/null || true
+          fi
+
+          zip -r "${DIST_DIR}.zip" "${DIST_DIR}"
+          sha256sum "${DIST_DIR}.zip" > "${DIST_DIR}.zip.sha256"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-packages
+          path: |
+            rubix-*-${{ matrix.target }}.*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display downloaded artifacts
+        run: |
+          ls -laR artifacts
+
+      - name: Publish Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: |
+            artifacts/**/*.*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

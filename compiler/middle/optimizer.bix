@@ -1,0 +1,197 @@
+# optimizer.bix - IR optimization pass manager and transform pipelines
+
+# Optimization pass index IDs (0..20)
+# (Pass slots are indexed numerically 0..20 directly in opt_ctx_init)
+
+
+let OPT_INFO_LEVEL = 0;
+let OPT_INFO_PASS_COUNT = 1;
+let OPT_INFO_TOTAL_CHANGED = 2;
+let OPT_INFO_PIPELINE_RUNS = 3;
+let OPT_INFO_ENABLED = 10;
+let OPT_INFO_RUNS = 11;
+let OPT_INFO_CHANGED = 12;
+
+fn opt_ctx_init(ctx: i64, opt_level: i64): i64 {
+    set_qword(ctx, 0, opt_level);
+    let p_count = 11;
+    if opt_level >= 2 {
+        p_count = 21;
+    }
+    set_qword(ctx, 1, p_count);
+    set_qword(ctx, 2, 0);  # total_changed = 0
+    set_qword(ctx, 3, 0);  # pipeline_runs = 0
+
+    let en_base = 0;
+    if opt_level >= 1 { en_base = 1; }
+
+    # Pass 0: OPT_PASS_IDENTITY
+    let p0 = ctx + 32;
+    set_qword(p0, 0, en_base); set_qword(p0, 1, 0); set_qword(p0, 2, 0); set_qword(p0, 3, 0);
+
+    # Pass 1: OPT_PASS_VERIFY_TIR
+    let p1 = ctx + 64;
+    set_qword(p1, 0, en_base); set_qword(p1, 1, 0); set_qword(p1, 2, 0); set_qword(p1, 3, 1);
+
+    # Pass 2: OPT_PASS_CONST_FOLD
+    let p2 = ctx + 96;
+    set_qword(p2, 0, en_base); set_qword(p2, 1, 0); set_qword(p2, 2, 0); set_qword(p2, 3, 2);
+
+    # Pass 3: OPT_PASS_DCE
+    let p3 = ctx + 128;
+    set_qword(p3, 0, en_base); set_qword(p3, 1, 0); set_qword(p3, 2, 0); set_qword(p3, 3, 3);
+
+    # Pass 4: OPT_PASS_PEEPHOLE
+    let p4 = ctx + 160;
+    set_qword(p4, 0, en_base); set_qword(p4, 1, 0); set_qword(p4, 2, 0); set_qword(p4, 3, 4);
+
+    # Pass 5: OPT_PASS_FRAME_OPT
+    let p5 = ctx + 192;
+    set_qword(p5, 0, en_base); set_qword(p5, 1, 0); set_qword(p5, 2, 0); set_qword(p5, 3, 5);
+
+    # Pass 6: OPT_PASS_CALL_REG
+    let p6 = ctx + 224;
+    set_qword(p6, 0, en_base); set_qword(p6, 1, 0); set_qword(p6, 2, 0); set_qword(p6, 3, 6);
+
+    # Pass 7: OPT_PASS_VALUE_OPT
+    let p7 = ctx + 256;
+    set_qword(p7, 0, en_base); set_qword(p7, 1, 0); set_qword(p7, 2, 0); set_qword(p7, 3, 7);
+
+    # Pass 8: OPT_PASS_LOOP_OPT
+    let p8 = ctx + 288;
+    set_qword(p8, 0, en_base); set_qword(p8, 1, 0); set_qword(p8, 2, 0); set_qword(p8, 3, 8);
+
+    # Pass 9: OPT_PASS_IPO
+    let p9 = ctx + 320;
+    set_qword(p9, 0, en_base); set_qword(p9, 1, 0); set_qword(p9, 2, 0); set_qword(p9, 3, 9);
+
+    # Pass 10: OPT_PASS_INTEGRATION
+    let p10 = ctx + 352;
+    set_qword(p10, 0, en_base); set_qword(p10, 1, 0); set_qword(p10, 2, 0); set_qword(p10, 3, 10);
+
+    # Phase 5 Passes (11..20):
+    let en_p5 = 0;
+    if opt_level >= 2 { en_p5 = 1; }
+
+    # Pass 11: OPT_PASS_SSA
+    let p11 = ctx + 384;
+    set_qword(p11, 0, en_p5); set_qword(p11, 1, 0); set_qword(p11, 2, 0); set_qword(p11, 3, 11);
+
+    # Pass 12: OPT_PASS_GLOBAL_VAL
+    let p12 = ctx + 416;
+    set_qword(p12, 0, en_p5); set_qword(p12, 1, 0); set_qword(p12, 2, 0); set_qword(p12, 3, 12);
+
+    # Pass 13: OPT_PASS_REG_ALLOC
+    let p13 = ctx + 448;
+    set_qword(p13, 0, en_p5); set_qword(p13, 1, 0); set_qword(p13, 2, 0); set_qword(p13, 3, 13);
+
+    # Pass 14: OPT_PASS_ADV_SPILL
+    let p14 = ctx + 480;
+    set_qword(p14, 0, en_p5); set_qword(p14, 1, 0); set_qword(p14, 2, 0); set_qword(p14, 3, 14);
+
+    # Pass 15: OPT_PASS_ADV_LOOP
+    let p15 = ctx + 512;
+    set_qword(p15, 0, en_p5); set_qword(p15, 1, 0); set_qword(p15, 2, 0); set_qword(p15, 3, 15);
+
+    # Pass 16: OPT_PASS_ADV_IPO
+    let p16 = ctx + 544;
+    set_qword(p16, 0, en_p5); set_qword(p16, 1, 0); set_qword(p16, 2, 0); set_qword(p16, 3, 16);
+
+    # Pass 17: OPT_PASS_CFG_OPT
+    let p17 = ctx + 576;
+    set_qword(p17, 0, en_p5); set_qword(p17, 1, 0); set_qword(p17, 2, 0); set_qword(p17, 3, 17);
+
+    # Pass 18: OPT_PASS_MACH_OPT
+    let p18 = ctx + 608;
+    set_qword(p18, 0, en_p5); set_qword(p18, 1, 0); set_qword(p18, 2, 0); set_qword(p18, 3, 18);
+
+    # Pass 19: OPT_PASS_ADV_PIPELINE
+    let p19 = ctx + 640;
+    set_qword(p19, 0, en_p5); set_qword(p19, 1, 0); set_qword(p19, 2, 0); set_qword(p19, 3, 19);
+
+    # Pass 20: OPT_PASS_DIAGNOSTICS
+    let p20 = ctx + 672;
+    set_qword(p20, 0, en_p5); set_qword(p20, 1, 0); set_qword(p20, 2, 0); set_qword(p20, 3, 20);
+
+    return 0;
+}
+
+fn opt_ctx_set_pass(ctx: i64, pass_id: i64, enabled: i64): i64 {
+    let count = get_qword(ctx, 1);
+    if pass_id < 0 { return -1; }
+    if pass_id >= count { return -1; }
+    let base = ctx + 32 + (pass_id * 32);
+    set_qword(base, 0, enabled);
+    return 0;
+}
+
+fn opt_ctx_get_info(ctx: i64, pass_id: i64, info_kind: i64): i64 {
+    if info_kind == 0 { return get_qword(ctx, 0); }
+    if info_kind == 1 { return get_qword(ctx, 1); }
+    if info_kind == 2 { return get_qword(ctx, 2); }
+    if info_kind == 3 { return get_qword(ctx, 3); }
+
+    let count = get_qword(ctx, 1);
+    if pass_id < 0 { return -1; }
+    if pass_id >= count { return -1; }
+    let base = ctx + 32 + (pass_id * 32);
+    if info_kind == 10 { return get_qword(base, 0); }
+    if info_kind == 11 { return get_qword(base, 1); }
+    if info_kind == 12 { return get_qword(base, 2); }
+    return 0;
+}
+
+fn opt_run_pipeline(ctx: i64, tir_buf: i64, count: i64): i64 {
+    let opt_lvl = get_qword(ctx, 0);
+    if opt_lvl == 0 {
+        # Unoptimized Mode: zero pass execution, returns immediately
+        return 0;
+    }
+
+    let p_runs = get_qword(ctx, 3);
+    set_qword(ctx, 3, p_runs + 1);
+
+    let total_ch = get_qword(ctx, 2);
+
+    # If this is a UIR buffer, delegate to the real fixed-point pipeline.
+    # uir_opt_run_pipeline runs up to 5 iterations until no more changes.
+    let is_uir = 0;
+    if get_qword(tir_buf, 4) == 1430932817 { is_uir = 1; }
+    if is_uir == 1 {
+        let ch = uir_opt_run_pipeline(tir_buf);
+        total_ch = total_ch + ch;
+        set_qword(ctx, 2, total_ch);
+        return total_ch;
+    }
+
+    # Legacy TIR path: single-pass linear scan (unchanged)
+    let num_passes = get_qword(ctx, 1);
+    let pass_idx = 0;
+    while pass_idx < num_passes {
+        let base = ctx + 32 + (pass_idx * 32);
+        let enabled = get_qword(base, 0);
+        if enabled == 1 {
+            let r_cnt = get_qword(base, 1);
+            set_qword(base, 1, r_cnt + 1);
+            let changed = 0;
+            if pass_idx == 0 {
+                let i = 0;
+                while i < count {
+                    let k = get_byte(tir_buf, i);
+                    i = i + 1;
+                }
+                changed = 0;
+            }
+            if changed > 0 {
+                let ch_cnt = get_qword(base, 2);
+                set_qword(base, 2, ch_cnt + changed);
+                total_ch = total_ch + changed;
+                set_qword(ctx, 2, total_ch);
+            }
+        }
+        pass_idx = pass_idx + 1;
+    }
+
+    return total_ch;
+}
+

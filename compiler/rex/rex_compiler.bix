@@ -1,0 +1,698 @@
+# ==============================================================================
+# Rubix Execution eXchange (REX) — Native Machine Code Compiler (x86-64)
+# File: compiler/rex/rex_compiler.bix
+#
+# Production high-performance execution engine for REX.
+# Compiles validated .rex modules into native host machine code (x86-64)
+# executing directly on the physical CPU at hardware speed.
+#
+# Semantic invariants:
+#   1. Strict pre-execution validation via rex_validate_module before any compilation.
+#   2. Local value slots ($v_0 \dots v_{k-1}$) mapped to aligned native stack frames.
+#   3. Checked bounded linear memory with inlined hardware bounds checks.
+#   4. Deterministic trap handling with instant stack unwinding (div0, mod0, oob, stack overflow).
+# ==============================================================================
+
+fn rex_x86_emit_byte(buf: i64, p: i64, b: i64): i64 {
+    set_byte(buf, p, b & 255);
+    return p + 1;
+}
+
+fn rex_x86_emit_u32(buf: i64, p: i64, v: i64): i64 {
+    set_byte(buf, p + 0, v & 255);
+    set_byte(buf, p + 1, (v >> 8) & 255);
+    set_byte(buf, p + 2, (v >> 16) & 255);
+    set_byte(buf, p + 3, (v >> 24) & 255);
+    return p + 4;
+}
+
+fn rex_x86_emit_i64(buf: i64, p: i64, v: i64): i64 {
+    let i = 0;
+    while i < 8 {
+        set_byte(buf, p + i, (v >> (i * 8)) & 255);
+        i = i + 1;
+    }
+    return p + 8;
+}
+
+# Emits: mov reg, [rsp + slot*8]
+# reg_id: rax=0, rcx=1, rdx=2, rbx=3, rsi=6, rdi=7
+fn rex_x86_emit_load_slot(buf: i64, p: i64, reg_id: i64, slot_idx: i64): i64 {
+    p = rex_x86_emit_byte(buf, p, 72);                    # 0x48 (REX.W)
+    p = rex_x86_emit_byte(buf, p, 139);                   # 0x8B (MOV r64, r/m64)
+    p = rex_x86_emit_byte(buf, p, 132 | (reg_id << 3));   # Mod=10, Reg=reg_id, RM=100 (SIB)
+    p = rex_x86_emit_byte(buf, p, 36);                    # SIB: Scale=0, Index=4(none), Base=4(rsp)
+    p = rex_x86_emit_u32(buf, p, slot_idx * 8);           # Disp32
+    return p;
+}
+
+# Emits: mov [rsp + slot*8], reg
+fn rex_x86_emit_store_slot(buf: i64, p: i64, slot_idx: i64, reg_id: i64): i64 {
+    p = rex_x86_emit_byte(buf, p, 72);                    # 0x48 (REX.W)
+    p = rex_x86_emit_byte(buf, p, 137);                   # 0x89 (MOV r/m64, r64)
+    p = rex_x86_emit_byte(buf, p, 132 | (reg_id << 3));   # Mod=10, Reg=reg_id, RM=100 (SIB)
+    p = rex_x86_emit_byte(buf, p, 36);                    # SIB
+    p = rex_x86_emit_u32(buf, p, slot_idx * 8);           # Disp32
+    return p;
+}
+
+# Compiles validated REX module into raw x86-64 machine instructions in code_buf.
+# Returns total byte length of emitted machine code, or negative error code.
+fn rex_compile_module(buf: i64, len: i64, code_buf: i64): i64 {
+    # 1. Mandatory Pre-Execution Validation
+    let val_res = rex_validate_module(buf, len);
+    if val_res != REX_OK {
+        return val_res;
+    }
+
+    # 2. Decode Header and Locate Sections
+    let hdr = sys_mmap_page();
+    rex_decode_header(buf, len, hdr);
+    let total_size = get_qword(hdr, 2);
+    let sec_cnt = get_qword(hdr, 3);
+
+    let sec_tbl = sys_mmap_page();
+    rex_locate_sections(buf, total_size, sec_cnt, sec_tbl);
+
+    # Find main function export index
+    let exp_off = get_qword(sec_tbl, REX_SEC_EXPORTS * 2 + 0);
+    let exp_cnt = rex_read_u32(buf, exp_off);
+    let ep = exp_off + 4;
+    let main_fidx = -1;
+    let ei = 0;
+    while ei < exp_cnt {
+        let h = rex_read_u64(buf, ep);
+        let fidx = rex_read_u32(buf, ep + 8);
+        ep = ep + 12;
+        if h == 6385467242 { # "main"
+            main_fidx = fidx;
+        }
+        ei = ei + 1;
+    }
+    if main_fidx < 0 {
+        return REX_ERR_NO_MAIN_EXPORT;
+    }
+
+    # Query function metadata
+    let funcs_off = get_qword(sec_tbl, REX_SEC_FUNCTIONS * 2 + 0);
+    let func_cnt = rex_read_u32(buf, funcs_off);
+
+    # Metadata tables:
+    # func_offsets: func_idx -> native_code_offset
+    let func_offsets = sys_mmap_page();
+    # func_call_patches: [patch_pos, target_fidx]
+    let func_call_patches = sys_mmap(0, 65536, 3, 34, -1, 0);
+    let func_call_patch_cnt = 0;
+
+    # Trap patch tables:
+    let trap_div0_patches = sys_mmap_page();
+    let trap_div0_cnt = 0;
+    let trap_oob_patches = sys_mmap_page();
+    let trap_oob_cnt = 0;
+    let trap_so_patches = sys_mmap_page();
+    let trap_so_cnt = 0;
+    let trap_exp_patches = sys_mmap_page();
+    let trap_exp_cnt = 0;
+
+    let p = 0;
+    # 0..1: jmp +30 (jump over metadata table to offset 32)
+    p = rex_x86_emit_byte(code_buf, p, 235);
+    p = rex_x86_emit_byte(code_buf, p, 30);
+    p = 32;
+
+    # 3. Emit Top-Level Entry Wrapper at offset 32:
+    p = rex_x86_emit_byte(code_buf, p, 83);               # push rbx
+    p = rex_x86_emit_byte(code_buf, p, 85);               # push rbp
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 84); # push r12 (mem_base)
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 85); # push r13 (mem_size)
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 86); # push r14 (alloc_ptr)
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 87); # push r15 (stack limit)
+
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 227); # mov rbx, rsp (top-level stack anchor)
+    # rdi is code_buf. Unpack metadata from [rdi + 8, 16, 24]:
+    p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 103); p = rex_x86_emit_byte(code_buf, p, 8);  # mov r12, [rdi + 8] (mem_base)
+    p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 111); p = rex_x86_emit_byte(code_buf, p, 16); # mov r13, [rdi + 16] (mem_size)
+    p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 119); p = rex_x86_emit_byte(code_buf, p, 24); # mov r14, [rdi + 24] (alloc_ptr)
+
+    # Initialize stack limit in r15 = rsp - 65536 (1024 frames of 64 bytes)
+    p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 231); # mov r15, rsp
+    p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 129); p = rex_x86_emit_byte(code_buf, p, 239); # sub r15, imm32
+    p = rex_x86_emit_u32(code_buf, p, 65536);
+
+    # Call main function: call rel32
+    p = rex_x86_emit_byte(code_buf, p, 232); # 0xE8
+    set_qword(func_call_patches, func_call_patch_cnt * 2 + 0, p);
+    set_qword(func_call_patches, func_call_patch_cnt * 2 + 1, main_fidx);
+    func_call_patch_cnt = func_call_patch_cnt + 1;
+    p = rex_x86_emit_u32(code_buf, p, 0);
+
+    # Exit label: normal return
+    let exit_label = p;
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 95); # pop r15
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 94); # pop r14
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 93); # pop r13
+    p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 92); # pop r12
+    p = rex_x86_emit_byte(code_buf, p, 93);               # pop rbp
+    p = rex_x86_emit_byte(code_buf, p, 91);               # pop rbx
+    p = rex_x86_emit_byte(code_buf, p, 195);              # ret
+
+    # Trap targets: unwinds rsp to rbx and returns -code
+    let trap_div0_target = p;
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 220); # mov rsp, rbx
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192); # mov rax, -1
+    p = rex_x86_emit_u32(code_buf, p, 4294967295);
+    p = rex_x86_emit_byte(code_buf, p, 233);
+    p = rex_x86_emit_u32(code_buf, p, exit_label - (p + 4));
+
+    let trap_oob_target = p;
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 220); # mov rsp, rbx
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192); # mov rax, -2
+    p = rex_x86_emit_u32(code_buf, p, 4294967294);
+    p = rex_x86_emit_byte(code_buf, p, 233);
+    p = rex_x86_emit_u32(code_buf, p, exit_label - (p + 4));
+
+    let trap_so_target = p;
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 220); # mov rsp, rbx
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192); # mov rax, -3
+    p = rex_x86_emit_u32(code_buf, p, 4294967293);
+    p = rex_x86_emit_byte(code_buf, p, 233);
+    p = rex_x86_emit_u32(code_buf, p, exit_label - (p + 4));
+
+    let trap_exp_target = p;
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 220); # mov rsp, rbx
+    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192); # mov rax, -5
+    p = rex_x86_emit_u32(code_buf, p, 4294967291);
+    p = rex_x86_emit_byte(code_buf, p, 233);
+    p = rex_x86_emit_u32(code_buf, p, exit_label - (p + 4));
+
+    # 4. Compile Each Function Body
+    let code_off = get_qword(sec_tbl, REX_SEC_CODE * 2 + 0);
+    let cp = code_off + 4;
+
+    let fi = 0;
+    while fi < func_cnt {
+        set_qword(func_offsets, fi, p);
+
+        let fp = funcs_off + 4 + (fi * 6);
+        let t_idx = rex_read_u32(buf, fp);
+        let local_cnt = rex_read_u16(buf, fp + 4);
+
+        let frame_size = (local_cnt * 8 + 15) & (0 - 16);
+        if frame_size < 16 { frame_size = 16; }
+
+        # Function prologue: stack check + frame creation
+        p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 252); # cmp rsp, r15
+        p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 134); # jbe trap_so
+        set_qword(trap_so_patches, trap_so_cnt, p);
+        trap_so_cnt = trap_so_cnt + 1;
+        p = rex_x86_emit_u32(code_buf, p, 0);
+
+        p = rex_x86_emit_byte(code_buf, p, 85);               # push rbp
+        p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 229); # mov rbp, rsp
+        p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 129); p = rex_x86_emit_byte(code_buf, p, 236); # sub rsp, frame_size
+        p = rex_x86_emit_u32(code_buf, p, frame_size);
+
+        # Copy incoming parameters from registers (rdi, rsi, rdx, rcx, r8, r9) into slots 0..5
+        let tp_scan = get_qword(sec_tbl, REX_SEC_TYPES * 2 + 0) + 4;
+        let ti = 0;
+        let p_cnt = 0;
+        while ti <= t_idx {
+            p_cnt = rex_read_u16(buf, tp_scan);
+            if ti == t_idx {
+                ti = t_idx + 1;
+            } else {
+                tp_scan = tp_scan + 2 + p_cnt + 1;
+                ti = ti + 1;
+            }
+        }
+        let pi = 0;
+        while (pi < p_cnt) & (pi < 6) {
+            let reg_id = 7; # rdi
+            if pi == 1 { reg_id = 6; } # rsi
+            if pi == 2 { reg_id = 2; } # rdx
+            if pi == 3 { reg_id = 1; } # rcx
+            if pi < 4 {
+                p = rex_x86_emit_store_slot(code_buf, p, pi, reg_id);
+            }
+            if pi == 4 { # r8
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 132); p = rex_x86_emit_byte(code_buf, p, 36);
+                p = rex_x86_emit_u32(code_buf, p, pi * 8);
+            }
+            if pi == 5 { # r9
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 140); p = rex_x86_emit_byte(code_buf, p, 36);
+                p = rex_x86_emit_u32(code_buf, p, pi * 8);
+            }
+            pi = pi + 1;
+        }
+
+        let body_len = rex_read_u32(buf, cp);
+        cp = cp + 4;
+        let body_start = cp;
+        let body_end = body_start + body_len;
+
+        # Tables for intra-function branch patching:
+        # inst_offsets: [rex_ip, native_code_offset]
+        let inst_offsets = sys_mmap(0, 65536, 3, 34, -1, 0);
+        let inst_cnt = 0;
+        let branch_patches = sys_mmap(0, 65536, 3, 34, -1, 0);
+        let branch_patch_cnt = 0;
+
+        let ip = body_start;
+        while ip < body_end {
+            let rel_rex_ip = ip - body_start;
+            set_qword(inst_offsets, inst_cnt * 2 + 0, rel_rex_ip);
+            set_qword(inst_offsets, inst_cnt * 2 + 1, p);
+            inst_cnt = inst_cnt + 1;
+
+            let op = rex_read_u8(buf, ip);
+            ip = ip + 1;
+
+            if op == REX_OP_CONST_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let val = rex_read_i64(buf, ip + 2);
+                ip = ip + 10;
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 184); # mov rax, val
+                p = rex_x86_emit_i64(code_buf, p, val);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_CONST_I32 {
+                let dst = rex_read_u16(buf, ip);
+                let val = rex_read_i32(buf, ip + 2);
+                ip = ip + 6;
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192); # mov rax, imm32
+                p = rex_x86_emit_u32(code_buf, p, val);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_MOVE {
+                let dst = rex_read_u16(buf, ip);
+                let src = rex_read_u16(buf, ip + 2);
+                ip = ip + 4;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, src);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_ADD_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1); # rax
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2); # rcx
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 1); p = rex_x86_emit_byte(code_buf, p, 200); # add rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_SUB_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 41); p = rex_x86_emit_byte(code_buf, p, 200); # sub rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_MUL_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 175); p = rex_x86_emit_byte(code_buf, p, 193); # imul rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if (op == REX_OP_DIV_I64) | (op == REX_OP_MOD_I64) {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                # Check divisor == 0
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2); # rcx
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 133); p = rex_x86_emit_byte(code_buf, p, 201); # test rcx, rcx
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 132); # jz trap_div0
+                set_qword(trap_div0_patches, trap_div0_cnt, p);
+                trap_div0_cnt = trap_div0_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1); # rax
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 153); # cqo
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 247); p = rex_x86_emit_byte(code_buf, p, 249); # idiv rcx
+                if op == REX_OP_DIV_I64 {
+                    p = rex_x86_emit_store_slot(code_buf, p, dst, 0); # quotient in rax
+                } else {
+                    p = rex_x86_emit_store_slot(code_buf, p, dst, 2); # remainder in rdx
+                }
+            }
+            if op == REX_OP_NEG_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let src = rex_read_u16(buf, ip + 2);
+                ip = ip + 4;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, src);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 247); p = rex_x86_emit_byte(code_buf, p, 216); # neg rax
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_AND_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 33); p = rex_x86_emit_byte(code_buf, p, 200); # and rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_OR_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 9); p = rex_x86_emit_byte(code_buf, p, 200); # or rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_XOR_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 49); p = rex_x86_emit_byte(code_buf, p, 200); # xor rax, rcx
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_NOT_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let src = rex_read_u16(buf, ip + 2);
+                ip = ip + 4;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, src);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 247); p = rex_x86_emit_byte(code_buf, p, 208); # not rax
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_SHL_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2); # cl
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 211); p = rex_x86_emit_byte(code_buf, p, 224); # shl rax, cl
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_SHR_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 211); p = rex_x86_emit_byte(code_buf, p, 232); # shr rax, cl
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 200); # cmp rax, rcx
+                let setcc = 148; # 0x94 sete
+                if op == REX_OP_CMP_NE { setcc = 149; } # setne
+                if op == REX_OP_CMP_LT { setcc = 156; } # setl
+                if op == REX_OP_CMP_LE { setcc = 158; } # setle
+                if op == REX_OP_CMP_GT { setcc = 159; } # setg
+                if op == REX_OP_CMP_GE { setcc = 157; } # setge
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, setcc); p = rex_x86_emit_byte(code_buf, p, 192); # setcc al
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 182); p = rex_x86_emit_byte(code_buf, p, 192); # movzx rax, al
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_JUMP {
+                let tgt = rex_read_u32(buf, ip);
+                ip = ip + 4;
+                p = rex_x86_emit_byte(code_buf, p, 233); # jmp rel32
+                set_qword(branch_patches, branch_patch_cnt * 2 + 0, p);
+                set_qword(branch_patches, branch_patch_cnt * 2 + 1, tgt);
+                branch_patch_cnt = branch_patch_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+            }
+            if op == REX_OP_BRANCH {
+                let cond = rex_read_u16(buf, ip);
+                let tgt_t = rex_read_u32(buf, ip + 2);
+                let tgt_f = rex_read_u32(buf, ip + 6);
+                ip = ip + 10;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, cond);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 133); p = rex_x86_emit_byte(code_buf, p, 192); # test rax, rax
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 133); # jne tgt_t
+                set_qword(branch_patches, branch_patch_cnt * 2 + 0, p);
+                set_qword(branch_patches, branch_patch_cnt * 2 + 1, tgt_t);
+                branch_patch_cnt = branch_patch_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                p = rex_x86_emit_byte(code_buf, p, 233); # jmp tgt_f
+                set_qword(branch_patches, branch_patch_cnt * 2 + 0, p);
+                set_qword(branch_patches, branch_patch_cnt * 2 + 1, tgt_f);
+                branch_patch_cnt = branch_patch_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+            }
+            if op == REX_OP_CALL {
+                let dst = rex_read_u16(buf, ip);
+                let call_fidx = rex_read_u32(buf, ip + 2);
+                let arg_cnt = rex_read_u16(buf, ip + 6);
+                ip = ip + 8;
+                let ai = 0;
+                while (ai < arg_cnt) & (ai < 6) {
+                    let aslot = rex_read_u16(buf, ip + (ai * 2));
+                    let reg_id = 7; # rdi
+                    if ai == 1 { reg_id = 6; } # rsi
+                    if ai == 2 { reg_id = 2; } # rdx
+                    if ai == 3 { reg_id = 1; } # rcx
+                    if ai < 4 {
+                        p = rex_x86_emit_load_slot(code_buf, p, reg_id, aslot);
+                    }
+                    if ai == 4 { # r8
+                        p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 132); p = rex_x86_emit_byte(code_buf, p, 36);
+                        p = rex_x86_emit_u32(code_buf, p, aslot * 8);
+                    }
+                    if ai == 5 { # r9
+                        p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 140); p = rex_x86_emit_byte(code_buf, p, 36);
+                        p = rex_x86_emit_u32(code_buf, p, aslot * 8);
+                    }
+                    ai = ai + 1;
+                }
+                ip = ip + (arg_cnt * 2);
+
+                p = rex_x86_emit_byte(code_buf, p, 232); # call rel32
+                set_qword(func_call_patches, func_call_patch_cnt * 2 + 0, p);
+                set_qword(func_call_patches, func_call_patch_cnt * 2 + 1, call_fidx);
+                func_call_patch_cnt = func_call_patch_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                if dst != 65535 {
+                    p = rex_x86_emit_store_slot(code_buf, p, dst, 0); # store rax
+                }
+            }
+            if op == REX_OP_RETURN {
+                let rslot = rex_read_u16(buf, ip);
+                ip = ip + 2;
+                if rslot != 65535 {
+                    p = rex_x86_emit_load_slot(code_buf, p, 0, rslot);
+                } else {
+                    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 49); p = rex_x86_emit_byte(code_buf, p, 192); # xor rax, rax
+                }
+                # Epilogue: add rsp, frame_size; pop rbp; ret
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 129); p = rex_x86_emit_byte(code_buf, p, 196);
+                p = rex_x86_emit_u32(code_buf, p, frame_size);
+                p = rex_x86_emit_byte(code_buf, p, 93);  # pop rbp
+                p = rex_x86_emit_byte(code_buf, p, 195); # ret
+            }
+            if op == REX_OP_LOAD_64 {
+                let dst = rex_read_u16(buf, ip);
+                let base = rex_read_u16(buf, ip + 2);
+                let offset = rex_read_i32(buf, ip + 4);
+                ip = ip + 8;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, base); # rax
+                if offset != 0 {
+                    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 5); # add rax, imm32
+                    p = rex_x86_emit_u32(code_buf, p, offset);
+                }
+                # Bounds check: rax + 8 <= r13
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 193); # mov rcx, rax
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 193); p = rex_x86_emit_byte(code_buf, p, 8); # add rcx, 8
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 233); # cmp rcx, r13
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 135); # ja trap_oob
+                set_qword(trap_oob_patches, trap_oob_cnt, p);
+                trap_oob_cnt = trap_oob_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                # mov rax, [r12 + rax]
+                p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 139); p = rex_x86_emit_byte(code_buf, p, 4); p = rex_x86_emit_byte(code_buf, p, 4);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_STORE_64 {
+                let base = rex_read_u16(buf, ip);
+                let val = rex_read_u16(buf, ip + 2);
+                let offset = rex_read_i32(buf, ip + 4);
+                ip = ip + 8;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, base);
+                if offset != 0 {
+                    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 5);
+                    p = rex_x86_emit_u32(code_buf, p, offset);
+                }
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 193);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 193); p = rex_x86_emit_byte(code_buf, p, 8);
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 233);
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 135);
+                set_qword(trap_oob_patches, trap_oob_cnt, p);
+                trap_oob_cnt = trap_oob_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                p = rex_x86_emit_load_slot(code_buf, p, 1, val); # rcx
+                # mov [r12 + rax], rcx
+                p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 12); p = rex_x86_emit_byte(code_buf, p, 4);
+            }
+            if op == REX_OP_ALLOC_MEM {
+                let dst = rex_read_u16(buf, ip);
+                let size = rex_read_u32(buf, ip + 2);
+                ip = ip + 6;
+                # mov rax, r14; mov [rsp+dst*8], rax; add r14, size
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 240);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+                p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 129); p = rex_x86_emit_byte(code_buf, p, 198);
+                p = rex_x86_emit_u32(code_buf, p, size);
+            }
+            if op == REX_OP_ADDR_LOCAL {
+                let dst = rex_read_u16(buf, ip);
+                let off = rex_read_u32(buf, ip + 2);
+                ip = ip + 6;
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 199); p = rex_x86_emit_byte(code_buf, p, 192);
+                p = rex_x86_emit_u32(code_buf, p, off);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_TRAP {
+                ip = ip + 2;
+                p = rex_x86_emit_byte(code_buf, p, 233);
+                set_qword(trap_exp_patches, trap_exp_cnt, p);
+                trap_exp_cnt = trap_exp_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+            }
+        }
+
+        # Backpatch intra-function branch targets
+        let bpi = 0;
+        while bpi < branch_patch_cnt {
+            let patch_pos = get_qword(branch_patches, bpi * 2 + 0);
+            let target_rex_ip = get_qword(branch_patches, bpi * 2 + 1);
+            let target_native = 0;
+            let ii = 0;
+            while ii < inst_cnt {
+                if get_qword(inst_offsets, ii * 2 + 0) == target_rex_ip {
+                    target_native = get_qword(inst_offsets, ii * 2 + 1);
+                }
+                ii = ii + 1;
+            }
+            let disp = target_native - (patch_pos + 4);
+            rex_x86_emit_u32(code_buf, patch_pos, disp);
+            bpi = bpi + 1;
+        }
+
+        cp = cp + body_len;
+        fi = fi + 1;
+    }
+
+    # 5. Backpatch Inter-Function Calls
+    let cpi = 0;
+    while cpi < func_call_patch_cnt {
+        let patch_pos = get_qword(func_call_patches, cpi * 2 + 0);
+        let target_fidx = get_qword(func_call_patches, cpi * 2 + 1);
+        let target_native = get_qword(func_offsets, target_fidx);
+        let disp = target_native - (patch_pos + 4);
+        rex_x86_emit_u32(code_buf, patch_pos, disp);
+        cpi = cpi + 1;
+    }
+
+    # 6. Backpatch Trap Jumps
+    let tpi = 0;
+    while tpi < trap_div0_cnt {
+        let patch_pos = get_qword(trap_div0_patches, tpi);
+        let disp = trap_div0_target - (patch_pos + 4);
+        rex_x86_emit_u32(code_buf, patch_pos, disp);
+        tpi = tpi + 1;
+    }
+    tpi = 0;
+    while tpi < trap_oob_cnt {
+        let patch_pos = get_qword(trap_oob_patches, tpi);
+        let disp = trap_oob_target - (patch_pos + 4);
+        rex_x86_emit_u32(code_buf, patch_pos, disp);
+        tpi = tpi + 1;
+    }
+    tpi = 0;
+    while tpi < trap_so_cnt {
+        let patch_pos = get_qword(trap_so_patches, tpi);
+        let disp = trap_so_target - (patch_pos + 4);
+        rex_x86_emit_u32(code_buf, patch_pos, disp);
+        tpi = tpi + 1;
+    }
+    tpi = 0;
+    while tpi < trap_exp_cnt {
+        let patch_pos = get_qword(trap_exp_patches, tpi);
+        let disp = trap_exp_target - (patch_pos + 4);
+        rex_x86_emit_u32(code_buf, patch_pos, disp);
+        tpi = tpi + 1;
+    }
+
+    return p;
+}
+
+# Executes a validated REX module via compiled native machine execution.
+# Allocates linear memory, JIT-compiles code, and executes on CPU directly.
+fn rex_execute_compiled(buf: i64, len: i64): i64 {
+    # Allocate executable memory buffer (PROT_READ | PROT_WRITE | PROT_EXEC = 7)
+    let code_buf = sys_mmap(0, 1048576, 7, 34, -1, 0);
+    let code_len = rex_compile_module(buf, len, code_buf);
+    if code_len < 0 {
+        return code_len;
+    }
+
+    # Allocate linear memory space
+    let mem_size = 65536;
+    let sec_tbl = sys_mmap_page();
+    rex_locate_sections(buf, len, 8, sec_tbl);
+    let mem_off = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 0);
+    let mem_len = get_qword(sec_tbl, REX_SEC_MEMORY * 2 + 1);
+    if mem_len >= 8 {
+        let req_init = rex_read_u32(buf, mem_off);
+        if req_init > mem_size {
+            mem_size = req_init;
+        }
+    }
+    let mem_buf = sys_mmap(0, mem_size, 3, 34, -1, 0);
+
+    # Initialize data segments
+    let data_off = get_qword(sec_tbl, REX_SEC_DATA * 2 + 0);
+    let data_len = get_qword(sec_tbl, REX_SEC_DATA * 2 + 1);
+    if data_len > 4 {
+        let seg_cnt = rex_read_u32(buf, data_off);
+        let dp = data_off + 4;
+        let si = 0;
+        while si < seg_cnt {
+            let seg_offset = rex_read_u32(buf, dp);
+            let seg_bytes = rex_read_u32(buf, dp + 4);
+            dp = dp + 8;
+            let bi = 0;
+            while bi < seg_bytes {
+                set_byte(mem_buf, seg_offset + bi, get_byte(buf, dp + bi));
+                bi = bi + 1;
+            }
+            dp = dp + seg_bytes;
+            si = si + 1;
+        }
+    }
+
+    let alloc_ptr = 1024;
+    set_qword(code_buf, 1, mem_buf);
+    set_qword(code_buf, 2, mem_size);
+    set_qword(code_buf, 3, alloc_ptr);
+
+    let res = executor_execute(code_buf, code_len);
+    return res;
+}
