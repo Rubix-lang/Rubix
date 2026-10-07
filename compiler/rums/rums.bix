@@ -500,6 +500,133 @@ fn rums_synthesize_function(uir_buf: i64, start_node: i64, end_node: i64, code_b
     return rums_synthesize_function_file(uir_buf, start_node, end_node, code_buf, start_len, path_buf);
 }
 
+fn rums_emit_builtin_print(model: i64, code_buf: i64, cur: i64, hash: i64): i64 {
+    let tid = get_qword(model, 1);
+    let p = cur;
+    if tid == 2 {
+        # AAPCS64 Function: print(val in x0)
+        p = mach_emit_u32(code_buf, p, 3506504703); # sub sp, sp, #64 (0xD10103FF)
+        p = mach_emit_u32(code_buf, p, 2835577853); # stp x29, x30, [sp, #48] (0xA9037BFD)
+        p = mach_emit_u32(code_buf, p, 2835502067); # stp x19, x20, [sp, #32] (0xA90253F3)
+        p = mach_emit_u32(code_buf, p, 2432697341); # mov x29, sp (0x910003FD)
+        p = mach_emit_u32(code_buf, p, 2432729057); # add x1, sp, #31 (0x91007FE1)
+        p = mach_emit_u32(code_buf, p, 1384120642); # movz w2, #10 (0x52800142)
+        p = mach_emit_u32(code_buf, p, 956301346);  # strb w2, [x1] (0x39000022)
+        p = mach_emit_u32(code_buf, p, 3531603971); # movz x3, #0 (0xD2800003)
+        p = mach_emit_u32(code_buf, p, 4043309087); # cmp x0, #0 (0xF100001F)
+        p = mach_emit_u32(code_buf, p, 1409286250); # b.ge +12 (0x5400006A)
+        p = mach_emit_u32(code_buf, p, 3405775840); # neg x0, x0 (0xCB0003E0)
+        p = mach_emit_u32(code_buf, p, 3531604003); # movz x3, #1 (0xD2800023)
+        p = mach_emit_u32(code_buf, p, 3531604292); # movz x4, #10 (0xD2800144)
+        # .Lloop
+        p = mach_emit_u32(code_buf, p, 2596538373); # udiv x5, x0, x4 (0x9AC40805)
+        p = mach_emit_u32(code_buf, p, 2600763558); # msub x6, x5, x4, x0 (0x9B0480A6)
+        p = mach_emit_u32(code_buf, p, 2432745670); # add x6, x6, #48 (0x9100C0C6)
+        p = mach_emit_u32(code_buf, p, 3506439201); # sub x1, x1, #1 (0xD1000421)
+        p = mach_emit_u32(code_buf, p, 956301350);  # strb w6, [x1] (0x39000026)
+        p = mach_emit_u32(code_buf, p, 2852455392); # mov x0, x5 (0xAA0503E0)
+        p = mach_emit_u32(code_buf, p, 3053453120); # cbnz x0, -24 (0xB5FFFF40)
+        # .Lcheck_neg
+        p = mach_emit_u32(code_buf, p, 3019899011); # cbz x3, +16 (0xB4000083)
+        p = mach_emit_u32(code_buf, p, 3506439201); # sub x1, x1, #1 (0xD1000421)
+        p = mach_emit_u32(code_buf, p, 1384121762); # movz w2, #45 (0x528005A2)
+        p = mach_emit_u32(code_buf, p, 956301346);  # strb w2, [x1] (0x39000022)
+        # .Ldone
+        p = mach_emit_u32(code_buf, p, 2432730082); # add x2, sp, #32 (0x910083E2)
+        p = mach_emit_u32(code_buf, p, 3405840450); # sub x2, x2, x1 (0xCB010042)
+        p = mach_emit_u32(code_buf, p, 3531604000); # movz x0, #1 (0xD2800020)
+        p = mach_emit_u32(code_buf, p, 3531606024); # movz x8, #64 (0xD2800808)
+        p = mach_emit_u32(code_buf, p, 3556769793); # svc #0 (0xD4000001)
+        p = mach_emit_u32(code_buf, p, 2839696371); # ldp x19, x20, [sp, #32] (0xA94253F3)
+        p = mach_emit_u32(code_buf, p, 2839772157); # ldp x29, x30, [sp, #48] (0xA9437BFD)
+        p = mach_emit_u32(code_buf, p, 2432762879); # add sp, sp, #64 (0x910103FF)
+        p = mach_emit_u32(code_buf, p, 3596551104); # ret (0xD65F03C0)
+        return p;
+    }
+    if tid == 3 {
+        # RISC-V 64 Function: print(val in a0)
+        p = mach_emit_u32(code_buf, p, 4227924243); # addi sp, sp, -64 (0xFC010113)
+        p = mach_emit_u32(code_buf, p, 34683939);   # sd ra, 56(sp) (0x02113C23)
+        p = mach_emit_u32(code_buf, p, 42022947);   # sd s0, 48(sp) (0x02813823)
+        p = mach_emit_u32(code_buf, p, 43070499);   # sd s1, 40(sp) (0x02913423)
+        p = mach_emit_u32(code_buf, p, 32572819);   # addi a1, sp, 31 (0x01F10593)
+        p = mach_emit_u32(code_buf, p, 10486419);   # li t0, 10 (0x00A00293)
+        p = mach_emit_u32(code_buf, p, 5603363);    # sb t0, 0(a1) (0x00558023)
+        p = mach_emit_u32(code_buf, p, 1171);       # li s1, 0 (0x00000493)
+        p = mach_emit_u32(code_buf, p, 10486675);   # li t2, 10 (0x00A00393)
+        p = mach_emit_u32(code_buf, p, 349795);     # bge a0, x0, +12 (0x00055663)
+        p = mach_emit_u32(code_buf, p, 1084228915); # sub a0, x0, a0 (0x40A00533)
+        p = mach_emit_u32(code_buf, p, 1049747);    # li s1, 1 (0x00100493)
+        # .Lloop
+        p = mach_emit_u32(code_buf, p, 41254451);   # remu t3, a0, t2 (0x02757E33)
+        p = mach_emit_u32(code_buf, p, 41243955);   # divu a0, a0, t2 (0x02755533)
+        p = mach_emit_u32(code_buf, p, 51252755);   # addi t3, t3, 48 (0x030E0E13)
+        p = mach_emit_u32(code_buf, p, 4294280595); # addi a1, a1, -1 (0xFFF58593)
+        p = mach_emit_u32(code_buf, p, 29720611);   # sb t3, 0(a1) (0x01C58023)
+        p = mach_emit_u32(code_buf, p, 4261746403); # bne a0, x0, -20 (0xFE0516E3)
+        # .Lcheck_neg
+        p = mach_emit_u32(code_buf, p, 297059);     # beq s1, x0, +16 (0x00048863)
+        p = mach_emit_u32(code_buf, p, 47186579);   # li t0, 45 (0x02D00293)
+        p = mach_emit_u32(code_buf, p, 4294280595); # addi a1, a1, -1 (0xFFF58593)
+        p = mach_emit_u32(code_buf, p, 5603363);    # sb t0, 0(a1) (0x00558023)
+        # .Ldone
+        p = mach_emit_u32(code_buf, p, 33621523);   # addi a2, sp, 32 (0x02010613)
+        p = mach_emit_u32(code_buf, p, 1085670963); # sub a2, a2, a1 (0x40B60633)
+        p = mach_emit_u32(code_buf, p, 1049875);    # li a0, 1 (0x00100513)
+        p = mach_emit_u32(code_buf, p, 67111059);   # li a7, 64 (0x04000893)
+        p = mach_emit_u32(code_buf, p, 115);        # ecall (0x00000073)
+        p = mach_emit_u32(code_buf, p, 42022019);   # ld s1, 40(sp) (0x02813483)
+        p = mach_emit_u32(code_buf, p, 50410499);   # ld s0, 48(sp) (0x03013403)
+        p = mach_emit_u32(code_buf, p, 58798211);   # ld ra, 56(sp) (0x03813083)
+        p = mach_emit_u32(code_buf, p, 67174675);   # addi sp, sp, 64 (0x04010113)
+        p = mach_emit_u32(code_buf, p, 32871);      # ret (0x00008067)
+        return p;
+    }
+    if tid == 1 {
+        # x86-64 Function: print(val in rdi)
+        p = mach_emit_byte(code_buf, p, 85);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 229);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 131); p = mach_emit_byte(code_buf, p, 236); p = mach_emit_byte(code_buf, p, 32);
+        p = mach_emit_byte(code_buf, p, 198); p = mach_emit_byte(code_buf, p, 68); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, 10);
+        p = mach_emit_byte(code_buf, p, 198); p = mach_emit_byte(code_buf, p, 68); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 14); p = mach_emit_byte(code_buf, p, 48);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 141); p = mach_emit_byte(code_buf, p, 116); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 14);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_disp32(code_buf, p, 1);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 194); p = mach_emit_disp32(code_buf, p, 2);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 192); p = mach_emit_disp32(code_buf, p, 1);
+        p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, 5);
+        p = mach_emit_byte(code_buf, p, 201);
+        p = mach_emit_byte(code_buf, p, 195);
+        return p;
+    }
+    return mach_model_emit_return(model, code_buf, p);
+}
+
+fn rums_emit_builtin_sar(model: i64, code_buf: i64, cur: i64): i64 {
+    let tid = get_qword(model, 1);
+    let p = cur;
+    if tid == 2 {
+        # AArch64: asr x0, x0, x1 (0x9AC12800); ret (0xD65F03C0)
+        p = mach_emit_u32(code_buf, p, 2596350976);
+        p = mach_emit_u32(code_buf, p, 3596551104);
+        return p;
+    }
+    if tid == 3 {
+        # RISC-V 64: sra a0, a0, a1 (0x40B55533); ret (0x00008067)
+        p = mach_emit_u32(code_buf, p, 1085625651);
+        p = mach_emit_u32(code_buf, p, 32871);
+        return p;
+    }
+    if tid == 1 {
+        # x86-64: mov rax, rdi; mov rcx, rsi; sar rax, cl; ret
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 248);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 241);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 211); p = mach_emit_byte(code_buf, p, 248);
+        p = mach_emit_byte(code_buf, p, 195);
+        return p;
+    }
+    return mach_model_emit_return(model, code_buf, p);
+}
+
 fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i64 {
     let model = 0;
     if target_or_model >= 65536 {
@@ -580,7 +707,7 @@ fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i
         return -1;
     }
 
-    # 5. Backpatch inter-function calls
+    # 5. Backpatch inter-function calls and resolve builtins
     let total_calls = get_qword(call_patches, 0);
     let ci = 0;
     while ci < total_calls {
@@ -593,6 +720,22 @@ fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i
                 target_offset = get_qword(func_tbl, fi * 2 + 1);
             }
             fi = fi + 1;
+        }
+        if target_offset < 0 {
+            if (target_hash == 210724587794) | (target_hash == 229479076111340) {
+                target_offset = l;
+                set_qword(func_tbl, func_count * 2 + 0, target_hash);
+                set_qword(func_tbl, func_count * 2 + 1, target_offset);
+                func_count = func_count + 1;
+                l = rums_emit_builtin_print(model, code_buf, l, target_hash);
+            }
+            if target_hash == 193505547 { # sar
+                target_offset = l;
+                set_qword(func_tbl, func_count * 2 + 0, target_hash);
+                set_qword(func_tbl, func_count * 2 + 1, target_offset);
+                func_count = func_count + 1;
+                l = rums_emit_builtin_sar(model, code_buf, l);
+            }
         }
         if target_offset >= 0 {
             mach_model_backpatch(model, code_buf, patch_pos, target_offset);

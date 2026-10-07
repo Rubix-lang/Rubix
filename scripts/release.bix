@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# release.bix - Create a release
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <version>"
+    echo "Example: $0 v0.1.0"
+    exit 1
+fi
+
+VERSION="$1"
+RELEASE_NAME="rubix-${VERSION}-linux-x86_64"
+
+echo "=== Creating Release $VERSION ==="
+
+# Build
+./scripts/build.bix
+
+# Create release binary
+cp rubix.elf "${RELEASE_NAME}"
+chmod +x "${RELEASE_NAME}"
+
+# Create checksum
+sha256sum "${RELEASE_NAME}" > SHA256SUMS
+
+# Create archive
+tar -czf "${RELEASE_NAME}.tar.gz" "${RELEASE_NAME}" SHA256SUMS README.md LICENSE
+
+# Create checksum for archive
+sha256sum "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
+
+echo ""
+echo "=== Release $VERSION Ready ==="
+echo "Binary: ${RELEASE_NAME}"
+echo "Archive: ${RELEASE_NAME}.tar.gz"
+echo "Checksums: SHA256SUMS, ${RELEASE_NAME}.tar.gz.sha256"
+echo ""
+echo "To create GitHub release:"
+echo "  git tag $VERSION"
+echo "  git push origin $VERSION"
+echo "  gh release create $VERSION ${RELEASE_NAME} SHA256SUMS ${RELEASE_NAME}.tar.gz"

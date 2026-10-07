@@ -15758,6 +15758,7 @@ let REX_OP_NOT_I64   = 25;  # 0x19: dst:u16, src:u16
 let REX_OP_SHL_I64   = 26;  # 0x1A: dst:u16, s1:u16, s2:u16
 
 let REX_OP_SHR_I64   = 27;  # 0x1B: dst:u16, s1:u16, s2:u16
+let REX_OP_SAR_I64   = 28;  # 0x1C: dst:u16, s1:u16, s2:u16
 
 
 
@@ -15788,6 +15789,10 @@ let REX_OP_CALL      = 50;  # 0x32: dst:u16, func_idx:u32, arg_cnt:u16, args:[u1
 let REX_OP_RETURN    = 51;  # 0x33: src:u16 (or 0xFFFF for void)
 
 let REX_OP_TRAP      = 52;  # 0x34: code:u16
+let REX_OP_PRINT     = 53;  # 0x35: src:u16, is_nl:u8
+let REX_OP_PRINT_STR = 54;  # 0x36: src:u16, is_nl:u8
+let HASH_PRINT_STR   = 249902713884791466;
+let HASH_PRINTLN_STR = 8246789558198118408;
 
 
 
@@ -15804,6 +15809,7 @@ let REX_OP_STORE_8   = 67;  # 0x43: base:u16, val:u16, offset:i32
 let REX_OP_ALLOC_MEM = 68;  # 0x44: dst:u16, size:u32
 
 let REX_OP_ADDR_LOCAL= 69;  # 0x45: dst:u16, offset:u32
+let REX_OP_ALLOC_DYN  = 70;  # 0x46: dst:u16, size_slot:u16
 
 
 
@@ -16204,6 +16210,43 @@ fn rex_enc_addr_local(buf: i64, p: i64, dst: i64, offset: i64): i64 {
 
     return cur;
 
+}
+
+fn rex_enc_print(buf: i64, p: i64, src: i64, is_nl: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_PRINT);
+    cur = rex_emit_u16(buf, cur, src);
+    cur = rex_emit_u8(buf, cur, is_nl);
+    return cur;
+}
+
+fn rex_enc_print_str(buf: i64, p: i64, src: i64, is_nl: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_PRINT_STR);
+    cur = rex_emit_u16(buf, cur, src);
+    cur = rex_emit_u8(buf, cur, is_nl);
+    return cur;
+}
+
+fn rex_enc_load8(buf: i64, p: i64, dst: i64, base: i64, offset: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_LOAD_8);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, base);
+    cur = rex_emit_i32(buf, cur, offset);
+    return cur;
+}
+
+fn rex_enc_store8(buf: i64, p: i64, base: i64, val: i64, offset: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_STORE_8);
+    cur = rex_emit_u16(buf, cur, base);
+    cur = rex_emit_u16(buf, cur, val);
+    cur = rex_emit_i32(buf, cur, offset);
+    return cur;
+}
+
+fn rex_enc_alloc_dyn(buf: i64, p: i64, dst: i64, size_slot: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_ALLOC_DYN);
+    cur = rex_emit_u16(buf, cur, dst);
+    cur = rex_emit_u16(buf, cur, size_slot);
+    return cur;
 }
 # ==============================================================================
 
@@ -16998,6 +17041,20 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
 
             }
 
+            if (op == REX_OP_PRINT) | (op == REX_OP_PRINT_STR) {
+
+                if ip + 3 > body_end { return REX_ERR_TRUNCATED; }
+
+                let src = rex_read_u16(buf, ip);
+
+                if src >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+
+                ip = ip + 3;
+
+                valid_op = 1;
+
+            }
+
             if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) {
 
                 if ip + 8 > body_end { return REX_ERR_TRUNCATED; }
@@ -17058,6 +17115,22 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
 
             }
 
+            if op == REX_OP_ALLOC_DYN {
+
+                if ip + 4 > body_end { return REX_ERR_TRUNCATED; }
+
+                let dst = rex_read_u16(buf, ip);
+
+                let size_slot = rex_read_u16(buf, ip + 2);
+
+                if (dst >= local_cnt) | (size_slot >= local_cnt) { return REX_ERR_INVALID_VAL_SLOT; }
+
+                ip = ip + 4;
+
+                valid_op = 1;
+
+            }
+
             if valid_op == 0 {
 
                 return REX_ERR_INVALID_OPCODE;
@@ -17084,88 +17157,52 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
 
             if op == REX_OP_MOVE { ip = ip + 4; }
 
-            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SHR_I64) {
-
+            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SAR_I64) {
                 if (op == REX_OP_NEG_I64) | (op == REX_OP_NOT_I64) { ip = ip + 4; }
-
                 else { ip = ip + 6; }
-
             }
-
             if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) { ip = ip + 6; }
-
             if op == REX_OP_JUMP {
-
                 let tgt = rex_read_u32(buf, ip);
-
                 ip = ip + 4;
-
                 let found = 0;
-
+                if tgt == body_len { found = 1; }
                 let ii = 0;
-
                 while ii < inst_cnt {
-
                     if get_qword(inst_starts, ii) == tgt { found = 1; }
-
                     ii = ii + 1;
-
                 }
-
                 if found == 0 { return REX_ERR_BAD_BRANCH_TGT; }
-
             }
-
             if op == REX_OP_BRANCH {
-
                 ip = ip + 2; # skip cond
-
                 let tgt_t = rex_read_u32(buf, ip);
-
                 let tgt_f = rex_read_u32(buf, ip + 4);
-
                 ip = ip + 8;
-
                 let found_t = 0;
-
                 let found_f = 0;
-
+                if tgt_t == body_len { found_t = 1; }
+                if tgt_f == body_len { found_f = 1; }
                 let ii = 0;
-
                 while ii < inst_cnt {
-
                     let istart = get_qword(inst_starts, ii);
-
                     if istart == tgt_t { found_t = 1; }
-
                     if istart == tgt_f { found_f = 1; }
-
                     ii = ii + 1;
-
                 }
-
                 if (found_t == 0) | (found_f == 0) { return REX_ERR_BAD_BRANCH_TGT; }
-
             }
-
             if op == REX_OP_CALL {
-
                 let arg_cnt = rex_read_u16(buf, ip + 6);
-
                 ip = ip + 8 + (arg_cnt * 2);
-
             }
-
             if op == REX_OP_RETURN { ip = ip + 2; }
-
             if op == REX_OP_TRAP { ip = ip + 2; }
-
+            if (op == REX_OP_PRINT) | (op == REX_OP_PRINT_STR) { ip = ip + 3; }
             if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) { ip = ip + 8; }
-
             if (op == REX_OP_STORE_64) | (op == REX_OP_STORE_8) { ip = ip + 8; }
-
             if (op == REX_OP_ALLOC_MEM) | (op == REX_OP_ADDR_LOCAL) { ip = ip + 6; }
-
+            if op == REX_OP_ALLOC_DYN { ip = ip + 4; }
         }
 
 
@@ -18059,6 +18096,32 @@ fn rex_vm_execute(buf: i64, len: i64): i64 {
 
         }
 
+        if op == REX_OP_LOAD_8 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let base = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 1 > mem_size) {
+                return 0 - REX_TRAP_OUT_OF_BOUNDS;
+            }
+            let val = get_byte(mem_buf, addr);
+            set_qword(cur_locals, dst, val);
+            cur_pc = cur_pc + 9;
+        }
+
+        if op == REX_OP_STORE_8 {
+            let base = rex_read_u16(buf, ip + 1);
+            let val_slot = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 1 > mem_size) {
+                return 0 - REX_TRAP_OUT_OF_BOUNDS;
+            }
+            let val = get_qword(cur_locals, val_slot);
+            set_byte(mem_buf, addr, val & 255);
+            cur_pc = cur_pc + 9;
+        }
+
         if op == REX_OP_ADDR_LOCAL {
 
             let dst = rex_read_u16(buf, ip + 1);
@@ -18068,6 +18131,31 @@ fn rex_vm_execute(buf: i64, len: i64): i64 {
             set_qword(cur_locals, dst, offset);
 
             cur_pc = cur_pc + 7;
+        }
+
+        if op == REX_OP_ALLOC_DYN {
+            let dst = rex_read_u16(buf, ip + 1);
+            let size_slot = rex_read_u16(buf, ip + 3);
+            let size = get_qword(cur_locals, size_slot);
+            let aligned_sz = (size + 7) & (0 - 8);
+            if mem_alloc_ptr + aligned_sz > mem_size {
+                return 0 - REX_TRAP_OUT_OF_BOUNDS;
+            }
+            set_qword(cur_locals, dst, mem_alloc_ptr);
+            mem_alloc_ptr = mem_alloc_ptr + aligned_sz;
+            cur_pc = cur_pc + 5;
+        }
+
+        if op == REX_OP_PRINT {
+            let src = rex_read_u16(buf, ip + 1);
+            let is_nl = rex_read_u8(buf, ip + 3);
+            let val = get_qword(cur_locals, src);
+            print(val);
+            cur_pc = cur_pc + 4;
+        }
+
+        if op == REX_OP_PRINT_STR {
+            cur_pc = cur_pc + 4;
         }
 
     }
@@ -18653,31 +18741,67 @@ fn rex_lower_uir_program(uir_buf: i64, code_buf: i64): i64 {
 
                 let arg_cnt = s2;
 
-                # Find target function index
+                if (target_fn_hash == 210724587794) | (target_fn_hash == 229479076111340) {
 
-                let target_fidx = -1;
+                    let is_nl = 0;
 
-                let ti = 0;
+                    if target_fn_hash == 229479076111340 { is_nl = 1; }
 
-                while ti < func_cnt {
+                    let print_slot = get_qword(call_args_buf, 0);
 
-                    if get_qword(func_meta, ti * 8 + 0) == target_fn_hash {
+                    cp = rex_enc_print(sec_code_buf, cp, print_slot, is_nl);
 
-                        target_fidx = ti;
+                    if dst != 65535 {
+
+                        cp = rex_enc_const_i64(sec_code_buf, cp, dst, 0);
 
                     }
 
-                    ti = ti + 1;
-
-                }
-
-                if target_fidx >= 0 {
-
-                    cp = rex_enc_call(sec_code_buf, cp, dst, target_fidx, arg_cnt, call_args_buf);
-
                 } else {
 
-                    return -3; # Unresolved function call
+                    if target_fn_hash == 193505547 { # sar(val, shift)
+
+                        let v_slot = get_qword(call_args_buf, 0);
+
+                        let s_slot = get_qword(call_args_buf, 1);
+
+                        if dst != 65535 {
+
+                            cp = rex_enc_bin_op(sec_code_buf, cp, REX_OP_SAR_I64, dst, v_slot, s_slot);
+
+                        }
+
+                    } else {
+
+                        # Find target function index
+
+                        let target_fidx = -1;
+
+                        let ti = 0;
+
+                        while ti < func_cnt {
+
+                            if get_qword(func_meta, ti * 8 + 0) == target_fn_hash {
+
+                                target_fidx = ti;
+
+                            }
+
+                            ti = ti + 1;
+
+                        }
+
+                        if target_fidx >= 0 {
+
+                            cp = rex_enc_call(sec_code_buf, cp, dst, target_fidx, arg_cnt, call_args_buf);
+
+                        } else {
+
+                            return -3; # Unresolved function call
+
+                        }
+
+                    }
 
                 }
 
@@ -19503,6 +19627,62 @@ fn rex_compile_module(buf: i64, len: i64, code_buf: i64): i64 {
                 p = rex_x86_emit_u32(code_buf, p, off);
                 p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
             }
+            if op == REX_OP_LOAD_8 {
+                let dst = rex_read_u16(buf, ip);
+                let base = rex_read_u16(buf, ip + 2);
+                let offset = rex_read_i32(buf, ip + 4);
+                ip = ip + 8;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, base);
+                if offset != 0 {
+                    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 5);
+                    p = rex_x86_emit_u32(code_buf, p, offset);
+                }
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 193);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 193); p = rex_x86_emit_byte(code_buf, p, 1);
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 233);
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 135);
+                set_qword(trap_oob_patches, trap_oob_cnt, p);
+                trap_oob_cnt = trap_oob_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 182); p = rex_x86_emit_byte(code_buf, p, 4); p = rex_x86_emit_byte(code_buf, p, 4);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
+            if op == REX_OP_STORE_8 {
+                let base = rex_read_u16(buf, ip);
+                let val = rex_read_u16(buf, ip + 2);
+                let offset = rex_read_i32(buf, ip + 4);
+                ip = ip + 8;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, base);
+                if offset != 0 {
+                    p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 5);
+                    p = rex_x86_emit_u32(code_buf, p, offset);
+                }
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 193);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 193); p = rex_x86_emit_byte(code_buf, p, 1);
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 57); p = rex_x86_emit_byte(code_buf, p, 233);
+                p = rex_x86_emit_byte(code_buf, p, 15); p = rex_x86_emit_byte(code_buf, p, 135);
+                set_qword(trap_oob_patches, trap_oob_cnt, p);
+                trap_oob_cnt = trap_oob_cnt + 1;
+                p = rex_x86_emit_u32(code_buf, p, 0);
+
+                p = rex_x86_emit_load_slot(code_buf, p, 1, val);
+                p = rex_x86_emit_byte(code_buf, p, 65); p = rex_x86_emit_byte(code_buf, p, 136); p = rex_x86_emit_byte(code_buf, p, 12); p = rex_x86_emit_byte(code_buf, p, 4);
+            }
+            if op == REX_OP_ALLOC_DYN {
+                let dst = rex_read_u16(buf, ip);
+                let size_slot = rex_read_u16(buf, ip + 2);
+                ip = ip + 4;
+                p = rex_x86_emit_load_slot(code_buf, p, 1, size_slot);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 193); p = rex_x86_emit_byte(code_buf, p, 7);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 131); p = rex_x86_emit_byte(code_buf, p, 225); p = rex_x86_emit_byte(code_buf, p, 248);
+                p = rex_x86_emit_byte(code_buf, p, 76); p = rex_x86_emit_byte(code_buf, p, 137); p = rex_x86_emit_byte(code_buf, p, 240);
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+                p = rex_x86_emit_byte(code_buf, p, 73); p = rex_x86_emit_byte(code_buf, p, 1); p = rex_x86_emit_byte(code_buf, p, 206);
+            }
+            if (op == REX_OP_PRINT) | (op == REX_OP_PRINT_STR) {
+                ip = ip + 3;
+            }
             if op == REX_OP_TRAP {
                 ip = ip + 2;
                 p = rex_x86_emit_byte(code_buf, p, 233);
@@ -19974,6 +20154,26 @@ fn rex_interpret_module(buf: i64, len: i64): i64 {
             set_byte(mem_buf, addr + 7, (val >> 56) & 255);
             cur_pc = cur_pc + 9;
         }
+        if op == REX_OP_LOAD_8 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let base = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 1 > mem_size) { return 0 - REX_TRAP_OUT_OF_BOUNDS; }
+            let val = get_byte(mem_buf, addr);
+            set_qword(cur_locals, dst, val);
+            cur_pc = cur_pc + 9;
+        }
+        if op == REX_OP_STORE_8 {
+            let base = rex_read_u16(buf, ip + 1);
+            let val_slot = rex_read_u16(buf, ip + 3);
+            let offset = rex_read_i32(buf, ip + 5);
+            let addr = get_qword(cur_locals, base) + offset;
+            if (addr < 0) | (addr + 1 > mem_size) { return 0 - REX_TRAP_OUT_OF_BOUNDS; }
+            let val = get_qword(cur_locals, val_slot);
+            set_byte(mem_buf, addr, val & 255);
+            cur_pc = cur_pc + 9;
+        }
         if op == REX_OP_ALLOC_MEM {
             let dst = rex_read_u16(buf, ip + 1);
             let sz = rex_read_u32(buf, ip + 3);
@@ -19983,11 +20183,31 @@ fn rex_interpret_module(buf: i64, len: i64): i64 {
             set_qword(mem_buf, 0, p_alloc + sz);
             cur_pc = cur_pc + 7;
         }
+        if op == REX_OP_ALLOC_DYN {
+            let dst = rex_read_u16(buf, ip + 1);
+            let size_slot = rex_read_u16(buf, ip + 3);
+            let sz = get_qword(cur_locals, size_slot);
+            let aligned_sz = (sz + 7) & (0 - 8);
+            let p_alloc = get_qword(mem_buf, 0);
+            if p_alloc < 1024 { p_alloc = 1024; }
+            set_qword(cur_locals, dst, p_alloc);
+            set_qword(mem_buf, 0, p_alloc + aligned_sz);
+            cur_pc = cur_pc + 5;
+        }
         if op == REX_OP_ADDR_LOCAL {
             let dst = rex_read_u16(buf, ip + 1);
             let off = rex_read_u32(buf, ip + 3);
             set_qword(cur_locals, dst, off);
             cur_pc = cur_pc + 7;
+        }
+        if op == REX_OP_PRINT {
+            let src = rex_read_u16(buf, ip + 1);
+            let val = get_qword(cur_locals, src);
+            print(val);
+            cur_pc = cur_pc + 4;
+        }
+        if op == REX_OP_PRINT_STR {
+            cur_pc = cur_pc + 4;
         }
     }
 
@@ -20003,10 +20223,10 @@ fn rex_execute(buf: i64, len: i64, mode: i64): i64 {
     if mode == REX_MODE_INTERPRET {
         return rex_interpret_module(buf, len);
     }
-    if mode == REX_MODE_VM {
-        return rex_vm_execute(buf, len);
+    if mode == REX_MODE_COMPILED {
+        return rex_execute_compiled(buf, len);
     }
-    return rex_execute_compiled(buf, len);
+    return rex_vm_execute(buf, len);
 }
 
 # File: compiler/rums/machdesc.bix
@@ -20999,16 +21219,32 @@ fn mach_model_emit_mov_reg(model: i64, code_buf: i64, cur: i64, dst: i64, src: i
 fn mach_model_emit_mov_imm(model: i64, code_buf: i64, cur: i64, dst: i64, imm: i64): i64 {
     let tid = get_qword(model, 1);
     if tid == 2 {
-        if imm < 0 {
+        if (imm >= 0) & (imm <= 65535) {
+            return mach_emit_u32(code_buf, cur, 3531603968 | (imm << 5) | dst);
+        }
+        if (imm < 0) & (imm >= -65536) {
             let inv16 = (0 - imm - 1) & 65535;
             return mach_emit_u32(code_buf, cur, 2457862144 | (inv16 << 5) | dst);
         }
-        let imm16 = imm & 65535;
-        return mach_emit_u32(code_buf, cur, 3531603968 | (imm16 << 5) | dst);
+        let imm_u32 = imm & 4294967295;
+        let lo16 = imm_u32 & 65535;
+        let hi16 = (imm_u32 >> 16) & 65535;
+        let cur1 = mach_emit_u32(code_buf, cur, 3531603968 | (lo16 << 5) | dst);
+        if hi16 != 0 {
+            return mach_emit_u32(code_buf, cur1, 4070572032 | (hi16 << 5) | dst);
+        }
+        return cur1;
     }
     if tid == 3 {
-        let imm12 = imm & 4095;
-        return mach_emit_u32(code_buf, cur, 19 | (imm12 << 20) | (dst << 7));
+        if (imm >= -2048) & (imm <= 2047) {
+            let imm12 = imm & 4095;
+            return mach_emit_u32(code_buf, cur, 19 | (imm12 << 20) | (dst << 7));
+        }
+        let imm_u32 = imm & 4294967295;
+        let lo12 = imm_u32 & 4095;
+        let hi20 = ((imm_u32 + 2048) >> 12) & 1048575;
+        let cur1 = mach_emit_u32(code_buf, cur, 55 | (hi20 << 12) | (dst << 7));
+        return mach_emit_u32(code_buf, cur1, 27 | (lo12 << 20) | (dst << 15) | (dst << 7));
     }
     if tid == 99 {
         return mach_emit_u32(code_buf, cur, 67108864 | ((dst & 255) << 24) | (imm & 16777215));
@@ -22285,6 +22521,133 @@ fn rums_synthesize_function(uir_buf: i64, start_node: i64, end_node: i64, code_b
     return rums_synthesize_function_file(uir_buf, start_node, end_node, code_buf, start_len, path_buf);
 }
 
+fn rums_emit_builtin_print(model: i64, code_buf: i64, cur: i64, hash: i64): i64 {
+    let tid = get_qword(model, 1);
+    let p = cur;
+    if tid == 2 {
+        # AAPCS64 Function: print(val in x0)
+        p = mach_emit_u32(code_buf, p, 3506504703); # sub sp, sp, #64 (0xD10103FF)
+        p = mach_emit_u32(code_buf, p, 2835577853); # stp x29, x30, [sp, #48] (0xA9037BFD)
+        p = mach_emit_u32(code_buf, p, 2835502067); # stp x19, x20, [sp, #32] (0xA90253F3)
+        p = mach_emit_u32(code_buf, p, 2432697341); # mov x29, sp (0x910003FD)
+        p = mach_emit_u32(code_buf, p, 2432729057); # add x1, sp, #31 (0x91007FE1)
+        p = mach_emit_u32(code_buf, p, 1384120642); # movz w2, #10 (0x52800142)
+        p = mach_emit_u32(code_buf, p, 956301346);  # strb w2, [x1] (0x39000022)
+        p = mach_emit_u32(code_buf, p, 3531603971); # movz x3, #0 (0xD2800003)
+        p = mach_emit_u32(code_buf, p, 4043309087); # cmp x0, #0 (0xF100001F)
+        p = mach_emit_u32(code_buf, p, 1409286250); # b.ge +12 (0x5400006A)
+        p = mach_emit_u32(code_buf, p, 3405775840); # neg x0, x0 (0xCB0003E0)
+        p = mach_emit_u32(code_buf, p, 3531604003); # movz x3, #1 (0xD2800023)
+        p = mach_emit_u32(code_buf, p, 3531604292); # movz x4, #10 (0xD2800144)
+        # .Lloop
+        p = mach_emit_u32(code_buf, p, 2596538373); # udiv x5, x0, x4 (0x9AC40805)
+        p = mach_emit_u32(code_buf, p, 2600763558); # msub x6, x5, x4, x0 (0x9B0480A6)
+        p = mach_emit_u32(code_buf, p, 2432745670); # add x6, x6, #48 (0x9100C0C6)
+        p = mach_emit_u32(code_buf, p, 3506439201); # sub x1, x1, #1 (0xD1000421)
+        p = mach_emit_u32(code_buf, p, 956301350);  # strb w6, [x1] (0x39000026)
+        p = mach_emit_u32(code_buf, p, 2852455392); # mov x0, x5 (0xAA0503E0)
+        p = mach_emit_u32(code_buf, p, 3053453120); # cbnz x0, -24 (0xB5FFFF40)
+        # .Lcheck_neg
+        p = mach_emit_u32(code_buf, p, 3019899011); # cbz x3, +16 (0xB4000083)
+        p = mach_emit_u32(code_buf, p, 3506439201); # sub x1, x1, #1 (0xD1000421)
+        p = mach_emit_u32(code_buf, p, 1384121762); # movz w2, #45 (0x528005A2)
+        p = mach_emit_u32(code_buf, p, 956301346);  # strb w2, [x1] (0x39000022)
+        # .Ldone
+        p = mach_emit_u32(code_buf, p, 2432730082); # add x2, sp, #32 (0x910083E2)
+        p = mach_emit_u32(code_buf, p, 3405840450); # sub x2, x2, x1 (0xCB010042)
+        p = mach_emit_u32(code_buf, p, 3531604000); # movz x0, #1 (0xD2800020)
+        p = mach_emit_u32(code_buf, p, 3531606024); # movz x8, #64 (0xD2800808)
+        p = mach_emit_u32(code_buf, p, 3556769793); # svc #0 (0xD4000001)
+        p = mach_emit_u32(code_buf, p, 2839696371); # ldp x19, x20, [sp, #32] (0xA94253F3)
+        p = mach_emit_u32(code_buf, p, 2839772157); # ldp x29, x30, [sp, #48] (0xA9437BFD)
+        p = mach_emit_u32(code_buf, p, 2432762879); # add sp, sp, #64 (0x910103FF)
+        p = mach_emit_u32(code_buf, p, 3596551104); # ret (0xD65F03C0)
+        return p;
+    }
+    if tid == 3 {
+        # RISC-V 64 Function: print(val in a0)
+        p = mach_emit_u32(code_buf, p, 4227924243); # addi sp, sp, -64 (0xFC010113)
+        p = mach_emit_u32(code_buf, p, 34683939);   # sd ra, 56(sp) (0x02113C23)
+        p = mach_emit_u32(code_buf, p, 42022947);   # sd s0, 48(sp) (0x02813823)
+        p = mach_emit_u32(code_buf, p, 43070499);   # sd s1, 40(sp) (0x02913423)
+        p = mach_emit_u32(code_buf, p, 32572819);   # addi a1, sp, 31 (0x01F10593)
+        p = mach_emit_u32(code_buf, p, 10486419);   # li t0, 10 (0x00A00293)
+        p = mach_emit_u32(code_buf, p, 5603363);    # sb t0, 0(a1) (0x00558023)
+        p = mach_emit_u32(code_buf, p, 1171);       # li s1, 0 (0x00000493)
+        p = mach_emit_u32(code_buf, p, 10486675);   # li t2, 10 (0x00A00393)
+        p = mach_emit_u32(code_buf, p, 349795);     # bge a0, x0, +12 (0x00055663)
+        p = mach_emit_u32(code_buf, p, 1084228915); # sub a0, x0, a0 (0x40A00533)
+        p = mach_emit_u32(code_buf, p, 1049747);    # li s1, 1 (0x00100493)
+        # .Lloop
+        p = mach_emit_u32(code_buf, p, 41254451);   # remu t3, a0, t2 (0x02757E33)
+        p = mach_emit_u32(code_buf, p, 41243955);   # divu a0, a0, t2 (0x02755533)
+        p = mach_emit_u32(code_buf, p, 51252755);   # addi t3, t3, 48 (0x030E0E13)
+        p = mach_emit_u32(code_buf, p, 4294280595); # addi a1, a1, -1 (0xFFF58593)
+        p = mach_emit_u32(code_buf, p, 29720611);   # sb t3, 0(a1) (0x01C58023)
+        p = mach_emit_u32(code_buf, p, 4261746403); # bne a0, x0, -20 (0xFE0516E3)
+        # .Lcheck_neg
+        p = mach_emit_u32(code_buf, p, 297059);     # beq s1, x0, +16 (0x00048863)
+        p = mach_emit_u32(code_buf, p, 47186579);   # li t0, 45 (0x02D00293)
+        p = mach_emit_u32(code_buf, p, 4294280595); # addi a1, a1, -1 (0xFFF58593)
+        p = mach_emit_u32(code_buf, p, 5603363);    # sb t0, 0(a1) (0x00558023)
+        # .Ldone
+        p = mach_emit_u32(code_buf, p, 33621523);   # addi a2, sp, 32 (0x02010613)
+        p = mach_emit_u32(code_buf, p, 1085670963); # sub a2, a2, a1 (0x40B60633)
+        p = mach_emit_u32(code_buf, p, 1049875);    # li a0, 1 (0x00100513)
+        p = mach_emit_u32(code_buf, p, 67111059);   # li a7, 64 (0x04000893)
+        p = mach_emit_u32(code_buf, p, 115);        # ecall (0x00000073)
+        p = mach_emit_u32(code_buf, p, 42022019);   # ld s1, 40(sp) (0x02813483)
+        p = mach_emit_u32(code_buf, p, 50410499);   # ld s0, 48(sp) (0x03013403)
+        p = mach_emit_u32(code_buf, p, 58798211);   # ld ra, 56(sp) (0x03813083)
+        p = mach_emit_u32(code_buf, p, 67174675);   # addi sp, sp, 64 (0x04010113)
+        p = mach_emit_u32(code_buf, p, 32871);      # ret (0x00008067)
+        return p;
+    }
+    if tid == 1 {
+        # x86-64 Function: print(val in rdi)
+        p = mach_emit_byte(code_buf, p, 85);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 229);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 131); p = mach_emit_byte(code_buf, p, 236); p = mach_emit_byte(code_buf, p, 32);
+        p = mach_emit_byte(code_buf, p, 198); p = mach_emit_byte(code_buf, p, 68); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, 10);
+        p = mach_emit_byte(code_buf, p, 198); p = mach_emit_byte(code_buf, p, 68); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 14); p = mach_emit_byte(code_buf, p, 48);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 141); p = mach_emit_byte(code_buf, p, 116); p = mach_emit_byte(code_buf, p, 36); p = mach_emit_byte(code_buf, p, 14);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_disp32(code_buf, p, 1);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 194); p = mach_emit_disp32(code_buf, p, 2);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 199); p = mach_emit_byte(code_buf, p, 192); p = mach_emit_disp32(code_buf, p, 1);
+        p = mach_emit_byte(code_buf, p, 15); p = mach_emit_byte(code_buf, p, 5);
+        p = mach_emit_byte(code_buf, p, 201);
+        p = mach_emit_byte(code_buf, p, 195);
+        return p;
+    }
+    return mach_model_emit_return(model, code_buf, p);
+}
+
+fn rums_emit_builtin_sar(model: i64, code_buf: i64, cur: i64): i64 {
+    let tid = get_qword(model, 1);
+    let p = cur;
+    if tid == 2 {
+        # AArch64: asr x0, x0, x1 (0x9AC12800); ret (0xD65F03C0)
+        p = mach_emit_u32(code_buf, p, 2596350976);
+        p = mach_emit_u32(code_buf, p, 3596551104);
+        return p;
+    }
+    if tid == 3 {
+        # RISC-V 64: sra a0, a0, a1 (0x40B55533); ret (0x00008067)
+        p = mach_emit_u32(code_buf, p, 1085625651);
+        p = mach_emit_u32(code_buf, p, 32871);
+        return p;
+    }
+    if tid == 1 {
+        # x86-64: mov rax, rdi; mov rcx, rsi; sar rax, cl; ret
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 248);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 137); p = mach_emit_byte(code_buf, p, 241);
+        p = mach_emit_byte(code_buf, p, 72); p = mach_emit_byte(code_buf, p, 211); p = mach_emit_byte(code_buf, p, 248);
+        p = mach_emit_byte(code_buf, p, 195);
+        return p;
+    }
+    return mach_model_emit_return(model, code_buf, p);
+}
+
 fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i64 {
     let model = 0;
     if target_or_model >= 65536 {
@@ -22378,6 +22741,22 @@ fn rums_synthesize_program(uir_buf: i64, code_buf: i64, target_or_model: i64): i
                 target_offset = get_qword(func_tbl, fi * 2 + 1);
             }
             fi = fi + 1;
+        }
+        if target_offset < 0 {
+            if (target_hash == 210724587794) | (target_hash == 229479076111340) {
+                target_offset = l;
+                set_qword(func_tbl, func_count * 2 + 0, target_hash);
+                set_qword(func_tbl, func_count * 2 + 1, target_offset);
+                func_count = func_count + 1;
+                l = rums_emit_builtin_print(model, code_buf, l, target_hash);
+            }
+            if target_hash == 193505547 { # sar
+                target_offset = l;
+                set_qword(func_tbl, func_count * 2 + 0, target_hash);
+                set_qword(func_tbl, func_count * 2 + 1, target_offset);
+                func_count = func_count + 1;
+                l = rums_emit_builtin_sar(model, code_buf, l);
+            }
         }
         if target_offset >= 0 {
             mach_model_backpatch(model, code_buf, patch_pos, target_offset);
@@ -23057,6 +23436,9 @@ fn compile_source_buffer_target(src: i64, src_len: i64, code_buf: i64, opt_level
             if rums_len > 0 {
                 return rums_len;
             }
+            if rums_len < 0 {
+                return rums_len;
+            }
             return -12;
         }
     }
@@ -23323,7 +23705,14 @@ fn compile_file_to_binary_target(src_path: i64, out_path: i64, target_id: i64): 
     }
 
     let final_res = code_len;
-    if is_elf == 1 {
+    if target_id == TARGET_REX {
+        let rex_fd = sys_open(out_path, 577, 493);
+        if rex_fd < 0 { return -20; }
+        let w_bytes = sys_write_all(rex_fd, code_buf, code_len);
+        sys_close(rex_fd);
+        if w_bytes != code_len { return -21; }
+        final_res = code_len;
+    } else if is_elf == 1 {
         final_res = write_elf_executable_target(out_path, code_buf, code_len, target_id);
         if final_res <= 0 {
             return final_res;
@@ -23590,6 +23979,33 @@ fn cli_print_targets(): i64 {
     return 0;
 }
 
+fn parse_target_str(s: i64): i64 {
+    if cli_streq(s, "x86_64-unknown-linux-elf") == 1 { return TARGET_X86_64; }
+    if cli_streq(s, "x86_64-linux") == 1 { return TARGET_X86_64; }
+    if cli_streq(s, "x86_64") == 1 { return TARGET_X86_64; }
+    if cli_streq(s, "aarch64-unknown-linux-elf") == 1 { return TARGET_ARM64; }
+    if cli_streq(s, "aarch64-linux") == 1 { return TARGET_ARM64; }
+    if cli_streq(s, "aarch64") == 1 { return TARGET_ARM64; }
+    if cli_streq(s, "arm64") == 1 { return TARGET_ARM64; }
+    if cli_streq(s, "riscv64-unknown-linux-elf") == 1 { return TARGET_RISCV64; }
+    if cli_streq(s, "riscv64-linux") == 1 { return TARGET_RISCV64; }
+    if cli_streq(s, "riscv64") == 1 { return TARGET_RISCV64; }
+    if cli_streq(s, "riscv") == 1 { return TARGET_RISCV64; }
+    if cli_streq(s, "rex-bytecode") == 1 { return TARGET_REX; }
+    if cli_streq(s, "rex") == 1 { return TARGET_REX; }
+    if cli_streq(s, "x86_64-pc-windows-pe") == 1 { return TARGET_WINDOWS; }
+    if cli_streq(s, "windows") == 1 { return TARGET_WINDOWS; }
+    if cli_streq(s, "pe") == 1 { return TARGET_WINDOWS; }
+    if cli_streq(s, "x86_64-apple-darwin-macho") == 1 { return TARGET_MACOS; }
+    if cli_streq(s, "macos") == 1 { return TARGET_MACOS; }
+    if cli_streq(s, "darwin") == 1 { return TARGET_MACOS; }
+    if cli_streq(s, "macho") == 1 { return TARGET_MACOS; }
+    if cli_streq(s, "wasm32-unknown-wasi") == 1 { return TARGET_WASM; }
+    if cli_streq(s, "wasm32-wasi") == 1 { return TARGET_WASM; }
+    if cli_streq(s, "wasm") == 1 { return TARGET_WASM; }
+    return -1;
+}
+
 fn compiler_check_entry_opt(src_path: i64, json_mode: i64): i64 {
     let fd = sys_open(src_path, 0, 0);
     if fd < 0 {
@@ -23813,11 +24229,13 @@ fn cli_usage(): i64 {
     cli_write_lit(2, "rubix: usage: rubix <command> [options]\n\n");
     cli_write_lit(2, "Commands:\n");
     cli_write_lit(2, "  run <file.bix>                          Execute a Rubix program\n");
-    cli_write_lit(2, "  compile <file.bix> [-o out.elf/.exe]    Compile to native executable/object\n");
+    cli_write_lit(2, "  compile <file.bix> [-o out] [-t target] Compile to native executable/object\n");
     cli_write_lit(2, "  check [--json] <file.bix>               Type-check and verify source\n");
     cli_write_lit(2, "  targets                                 Show target architecture registry\n");
     cli_write_lit(2, "  emit <tokens|uir|pe|macho|wasm> <file>  Inspect IR or package binary\n\n");
     cli_write_lit(2, "Options:\n");
+    cli_write_lit(2, "  -t, --target <target>                   Specify compilation target\n");
+    cli_write_lit(2, "  -o, --output <file>                     Specify output binary path\n");
     cli_write_lit(2, "  --version                               Print version information\n");
     cli_write_lit(2, "  --help                                  Show this help message\n");
     return 0;
@@ -23832,7 +24250,7 @@ fn main(argc: i64, argv: i64): i64 {
     }
     let a1 = get_qword(argv, 1);
     if cli_streq(a1, "--version") == 1 {
-        cli_write_lit(1, "rubix v1.0.0\n");
+        cli_write_lit(1, "rubix v0.1.0\n");
         return 0;
     }
     if (cli_streq(a1, "--help") == 1) | (cli_streq(a1, "-h") == 1) {
@@ -23891,17 +24309,53 @@ fn main(argc: i64, argv: i64): i64 {
     }
     if cli_streq(a1, "compile") == 1 {
         if argc < 3 { return cli_usage(); }
-        let src_file = get_qword(argv, 2);
+        let src_file = 0;
         let out_file = 0;
-        if argc >= 5 {
-            if cli_streq(get_qword(argv, 3), "-o") == 1 {
-                out_file = get_qword(argv, 4);
+        let target_str = 0;
+        let i = 2;
+        while i < argc {
+            let arg = get_qword(argv, i);
+            if (cli_streq(arg, "-o") == 1) | (cli_streq(arg, "--output") == 1) {
+                if i + 1 < argc {
+                    out_file = get_qword(argv, i + 1);
+                    i = i + 1;
+                }
+            } else if (cli_streq(arg, "-t") == 1) | (cli_streq(arg, "--target") == 1) {
+                if i + 1 < argc {
+                    target_str = get_qword(argv, i + 1);
+                    i = i + 1;
+                }
+            } else if get_byte(arg, 0) != 45 {
+                if src_file == 0 {
+                    src_file = arg;
+                }
             }
+            i = i + 1;
         }
-        if (out_file == 0) & (argc >= 4) {
-            out_file = get_qword(argv, 3);
+        if src_file == 0 { return cli_usage(); }
+        if out_file == 0 {
+            let def_out = sys_mmap(0, 64, 3, 34, -1, 0);
+            set_byte(def_out, 0, 97);
+            set_byte(def_out, 1, 46);
+            set_byte(def_out, 2, 111);
+            set_byte(def_out, 3, 117);
+            set_byte(def_out, 4, 116);
+            set_byte(def_out, 5, 0);
+            out_file = def_out;
         }
-        return compiler_entry(src_file, out_file);
+        let target_id = TARGET_X86_64;
+        if target_str != 0 {
+            target_id = parse_target_str(target_str);
+            if target_id < 0 {
+                cli_write_lit(2, "rubix: error: unknown or unsupported compilation target\n");
+                return 1;
+            }
+        } else {
+            target_id = detect_target_from_path(out_file);
+        }
+        let w_res = compile_file_to_binary_target(src_file, out_file, target_id);
+        if w_res > 0 { return 0; }
+        return w_res;
     }
     if argc >= 3 {
         return compiler_entry(a1, get_qword(argv, 2));

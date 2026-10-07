@@ -1,225 +1,281 @@
 # ==============================================================================
 # Rubix Standard Library: Collection & Array Utilities (std/collections.bix)
-# Pure native fixed-array operations, reductions, search, and predicates.
+# Pure native fixed-array operations, reductions, search, and dynamic collections.
+# Built on raw sys_mmap syscalls and portable memory access primitives.
 # ==============================================================================
 
 fn sum_4(arr: [i64; 4]): i64 {
     let mut_sum = 0;
-    for x in arr {
-        mut_sum = mut_sum + x;
+    let i = 0;
+    while i < 4 {
+        mut_sum = mut_sum + arr[i];
+        i = i + 1;
     }
     return mut_sum;
 }
 
 fn min_4(arr: [i64; 4]): i64 {
     let mut_min = arr[0];
-    for x in arr {
+    let i = 1;
+    while i < 4 {
+        let x = arr[i];
         if x < mut_min {
             mut_min = x;
         }
+        i = i + 1;
     }
     return mut_min;
 }
 
 fn max_4(arr: [i64; 4]): i64 {
     let mut_max = arr[0];
-    for x in arr {
+    let i = 1;
+    while i < 4 {
+        let x = arr[i];
         if x > mut_max {
             mut_max = x;
         }
+        i = i + 1;
     }
     return mut_max;
 }
 
 fn contains_4(arr: [i64; 4], target: i64): bool {
-    for x in arr {
-        if x == target { return true; }
+    let i = 0;
+    while i < 4 {
+        if arr[i] == target { return true; }
+        i = i + 1;
     }
     return false;
 }
 
 fn find_4(arr: [i64; 4], target: i64): i64 {
-    for i, x in arr {
-        if x == target { return i; }
+    let i = 0;
+    while i < 4 {
+        if arr[i] == target { return i; }
+        i = i + 1;
     }
     return -1;
 }
 
 fn count_4(arr: [i64; 4], target: i64): i64 {
     let mut_count = 0;
-    for x in arr {
-        if x == target {
+    let i = 0;
+    while i < 4 {
+        if arr[i] == target {
             mut_count = mut_count + 1;
         }
+        i = i + 1;
     }
     return mut_count;
 }
 
 fn sum_8(arr: [i64; 8]): i64 {
     let mut_sum = 0;
-    for x in arr {
-        mut_sum = mut_sum + x;
+    let i = 0;
+    while i < 8 {
+        mut_sum = mut_sum + arr[i];
+        i = i + 1;
     }
     return mut_sum;
 }
 
 fn min_8(arr: [i64; 8]): i64 {
     let mut_min = arr[0];
-    for x in arr {
+    let i = 1;
+    while i < 8 {
+        let x = arr[i];
         if x < mut_min {
             mut_min = x;
         }
+        i = i + 1;
     }
     return mut_min;
 }
 
 fn max_8(arr: [i64; 8]): i64 {
     let mut_max = arr[0];
-    for x in arr {
+    let i = 1;
+    while i < 8 {
+        let x = arr[i];
         if x > mut_max {
             mut_max = x;
         }
+        i = i + 1;
     }
     return mut_max;
 }
 
 fn contains_8(arr: [i64; 8], target: i64): bool {
-    for x in arr {
-        if x == target { return true; }
+    let i = 0;
+    while i < 8 {
+        if arr[i] == target { return true; }
+        i = i + 1;
     }
     return false;
 }
 
 fn find_8(arr: [i64; 8], target: i64): i64 {
-    for i, x in arr {
-        if x == target { return i; }
+    let i = 0;
+    while i < 8 {
+        if arr[i] == target { return i; }
+        i = i + 1;
     }
     return -1;
 }
 
-fn first_4(arr: [i64; 4]): i64 =
-    arr[0];
+fn first_4(arr: [i64; 4]): i64 {
+    return arr[0];
+}
 
-fn last_4(arr: [i64; 4]): i64 =
-    arr[3];
+fn last_4(arr: [i64; 4]): i64 {
+    return arr[3];
+}
 
 fn all_positive_4(arr: [i64; 4]): bool {
-    for x in arr {
-        if x <= 0 { return false; }
+    let i = 0;
+    while i < 4 {
+        if arr[i] <= 0 { return false; }
+        i = i + 1;
     }
     return true;
 }
 
 fn any_negative_4(arr: [i64; 4]): bool {
-    for x in arr {
-        if x < 0 { return true; }
+    let i = 0;
+    while i < 4 {
+        if arr[i] < 0 { return true; }
+        i = i + 1;
     }
     return false;
 }
 
-fn first_8(arr: [i64; 8]): i64 =
-    arr[0];
+fn first_8(arr: [i64; 8]): i64 {
+    return arr[0];
+}
 
-fn last_8(arr: [i64; 8]): i64 =
-    arr[7];
+fn last_8(arr: [i64; 8]): i64 {
+    return arr[7];
+}
 
 # ==============================================================================
-# Rubix Dynamic Collections — Runtime Heap-Backed Implementations
+# Rubix Dynamic Collections — Universal Runtime Heap-Backed Implementations
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# 1. Dynamic Vector (List / Dynamic Array)
-# ------------------------------------------------------------------------------
 struct Vector {
     data: *i64,
     len: i64,
     cap: i64
 }
 
-fn vec_new(initial_cap: i64): *Vector {
-    let v = alloc_buffer(24) as *Vector;
-    let cap = initial_cap;
-    if cap <= 0 { cap = 8; }
-    v.data = alloc_buffer(cap * 8) as *i64;
-    v.len = 0;
-    v.cap = cap;
-    return v;
-}
-
-fn vec_push(self: *Vector, val: i64): i64 {
-    if self.len >= self.cap {
-        let new_cap = self.cap * 2;
-        let new_buf = alloc_buffer(new_cap * 8) as *i64;
-        let i = 0;
-        let d = self.data;
-        while i < self.len {
-            new_buf[i] = d[i];
-            i = i + 1;
-        }
-        self.data = new_buf;
-        self.cap = new_cap;
-    }
-    let d = self.data;
-    d[self.len] = val;
-    self.len = self.len + 1;
-    return self.len;
-}
-
-fn vec_get(self: *Vector, idx: i64): i64 {
-    if (idx < 0) | (idx >= self.len) { return -999999999; }
-    let d = self.data;
-    return d[idx];
-}
-
-fn vec_set(self: *Vector, idx: i64, val: i64): i64 {
-    if (idx < 0) | (idx >= self.len) { return -1; }
-    let d = self.data;
-    d[idx] = val;
-    return 0;
-}
-
-fn vec_len(self: *Vector): i64 { return self.len; }
-fn vec_cap(self: *Vector): i64 { return self.cap; }
-
-# ------------------------------------------------------------------------------
-# 2. Dynamic String (DynString)
-# ------------------------------------------------------------------------------
 struct DynString {
     data: *u8,
     len: i64,
     cap: i64
 }
 
+struct HashMap {
+    keys: *i64,
+    vals: *i64,
+    occupied: *i64,
+    cap: i64,
+    size: i64
+}
+
+# ------------------------------------------------------------------------------
+# 1. Dynamic Vector (List / Dynamic Array)
+# Layout: [qword 0: data_ptr, qword 1: len, qword 2: cap]
+# ------------------------------------------------------------------------------
+fn vec_new(initial_cap: i64): *Vector {
+    let v = sys_mmap(0, 4096, 3, 34, -1, 0);
+    let cap = initial_cap;
+    if cap <= 0 { cap = 8; }
+    let data = sys_mmap(0, cap * 8, 3, 34, -1, 0);
+    set_qword(v, 0, data);
+    set_qword(v, 1, 0);
+    set_qword(v, 2, cap);
+    return v as *Vector;
+}
+
+fn vec_push(self: *Vector, val: i64): i64 {
+    let s = self as i64;
+    let len = get_qword(s, 1);
+    let cap = get_qword(s, 2);
+    if len >= cap {
+        let new_cap = cap * 2;
+        let new_buf = sys_mmap(0, new_cap * 8, 3, 34, -1, 0);
+        let i = 0;
+        let d = get_qword(s, 0);
+        while i < len {
+            set_qword(new_buf, i, get_qword(d, i));
+            i = i + 1;
+        }
+        set_qword(s, 0, new_buf);
+        set_qword(s, 2, new_cap);
+    }
+    let d = get_qword(s, 0);
+    set_qword(d, len, val);
+    set_qword(s, 1, len + 1);
+    return len + 1;
+}
+
+fn vec_get(self: *Vector, idx: i64): i64 {
+    let s = self as i64;
+    let len = get_qword(s, 1);
+    if (idx < 0) | (idx >= len) { return -999999999; }
+    let d = get_qword(s, 0);
+    return get_qword(d, idx);
+}
+
+fn vec_set(self: *Vector, idx: i64, val: i64): i64 {
+    let s = self as i64;
+    let len = get_qword(s, 1);
+    if (idx < 0) | (idx >= len) { return -1; }
+    let d = get_qword(s, 0);
+    set_qword(d, idx, val);
+    return 0;
+}
+
+fn vec_len(self: *Vector): i64 { return get_qword(self as i64, 1); }
+fn vec_cap(self: *Vector): i64 { return get_qword(self as i64, 2); }
+
+# ------------------------------------------------------------------------------
+# 2. Dynamic String (DynString)
+# Layout: [qword 0: data_ptr, qword 1: len, qword 2: cap]
+# ------------------------------------------------------------------------------
 fn str_new(initial_cap: i64): *DynString {
-    let s = alloc_buffer(24) as *DynString;
+    let s = sys_mmap(0, 4096, 3, 34, -1, 0);
     let cap = initial_cap;
     if cap <= 0 { cap = 16; }
-    s.data = alloc_buffer(cap) as *u8;
-    s.len = 0;
-    s.cap = cap;
-    let d = s.data;
-    d[0] = 0 as u8;
-    return s;
+    let data = sys_mmap(0, cap, 3, 34, -1, 0);
+    set_qword(s, 0, data);
+    set_qword(s, 1, 0);
+    set_qword(s, 2, cap);
+    set_byte(data, 0, 0);
+    return s as *DynString;
 }
 
 fn str_push_byte(self: *DynString, b: i64): i64 {
-    if self.len + 1 >= self.cap {
-        let new_cap = self.cap * 2;
-        let new_buf = alloc_buffer(new_cap) as *u8;
+    let s = self as i64;
+    let len = get_qword(s, 1);
+    let cap = get_qword(s, 2);
+    if len + 1 >= cap {
+        let new_cap = cap * 2;
+        let new_buf = sys_mmap(0, new_cap, 3, 34, -1, 0);
         let i = 0;
-        let d = self.data;
-        while i < self.len {
-            new_buf[i] = d[i];
+        let d = get_qword(s, 0);
+        while i < len {
+            set_byte(new_buf, i, get_byte(d, i));
             i = i + 1;
         }
-        self.data = new_buf;
-        self.cap = new_cap;
+        set_qword(s, 0, new_buf);
+        set_qword(s, 2, new_cap);
     }
-    let d = self.data;
-    d[self.len] = b as u8;
-    self.len = self.len + 1;
-    d[self.len] = 0 as u8;
-    return self.len;
+    let d = get_qword(s, 0);
+    set_byte(d, len, b & 255);
+    set_qword(s, 1, len + 1);
+    set_byte(d, len + 1, 0);
+    return len + 1;
 }
 
 fn str_append(self: *DynString, text: str): i64 {
@@ -230,24 +286,28 @@ fn str_append(self: *DynString, text: str): i64 {
         str_push_byte(self, b as i64);
         i = i + 1;
     }
-    return self.len;
+    return get_qword(self as i64, 1);
 }
 
 fn str_get_byte(self: *DynString, idx: i64): i64 {
-    if (idx < 0) | (idx >= self.len) { return 0; }
-    let d = self.data;
-    return d[idx] as i64;
+    let s = self as i64;
+    let len = get_qword(s, 1);
+    if (idx < 0) | (idx >= len) { return 0; }
+    let d = get_qword(s, 0);
+    return get_byte(d, idx);
 }
 
-fn str_len(self: *DynString): i64 { return self.len; }
+fn str_len(self: *DynString): i64 { return get_qword(self as i64, 1); }
 
 fn str_equals(self: *DynString, other: str): bool {
+    let s = self as i64;
+    let len = get_qword(s, 1);
     let o_len = string_length(other);
-    if self.len != o_len { return false; }
-    let d = self.data;
+    if len != o_len { return false; }
+    let d = get_qword(s, 0);
     let i = 0;
-    while i < self.len {
-        let b1 = d[i] as i64;
+    while i < len {
+        let b1 = get_byte(d, i);
         let b2 = string_byte_at(other, i) as i64;
         if b1 != b2 { return false; }
         i = i + 1;
@@ -257,31 +317,26 @@ fn str_equals(self: *DynString, other: str): bool {
 
 # ------------------------------------------------------------------------------
 # 3. Dynamic Hash Map (HashMap)
+# Layout: [qword 0: keys, qword 1: vals, qword 2: occupied, qword 3: cap, qword 4: size]
 # ------------------------------------------------------------------------------
-struct HashMap {
-    keys: *i64,
-    vals: *i64,
-    occupied: *i64,
-    cap: i64,
-    size: i64
-}
-
 fn map_new(cap: i64): *HashMap {
-    let m = alloc_buffer(40) as *HashMap;
+    let m = sys_mmap(0, 4096, 3, 34, -1, 0);
     let c = cap;
     if c <= 0 { c = 16; }
-    m.keys = alloc_buffer(c * 8) as *i64;
-    m.vals = alloc_buffer(c * 8) as *i64;
-    m.occupied = alloc_buffer(c * 8) as *i64;
-    m.cap = c;
-    m.size = 0;
-    let occ = m.occupied;
+    let keys = sys_mmap(0, c * 8, 3, 34, -1, 0);
+    let vals = sys_mmap(0, c * 8, 3, 34, -1, 0);
+    let occupied = sys_mmap(0, c * 8, 3, 34, -1, 0);
+    set_qword(m, 0, keys);
+    set_qword(m, 1, vals);
+    set_qword(m, 2, occupied);
+    set_qword(m, 3, c);
+    set_qword(m, 4, 0);
     let i = 0;
     while i < c {
-        occ[i] = 0;
+        set_qword(occupied, i, 0);
         i = i + 1;
     }
-    return m;
+    return m as *HashMap;
 }
 
 fn map_hash_key(key: i64, cap: i64): i64 {
@@ -292,22 +347,24 @@ fn map_hash_key(key: i64, cap: i64): i64 {
 }
 
 fn map_put(self: *HashMap, key: i64, val: i64): i64 {
-    let c = self.cap;
-    let keys = self.keys;
-    let vals = self.vals;
-    let occ = self.occupied;
+    let s = self as i64;
+    let c = get_qword(s, 3);
+    let keys = get_qword(s, 0);
+    let vals = get_qword(s, 1);
+    let occ = get_qword(s, 2);
     let slot = map_hash_key(key, c);
     let probes = 0;
     while probes < c {
-        if occ[slot] == 0 {
-            keys[slot] = key;
-            vals[slot] = val;
-            occ[slot] = 1;
-            self.size = self.size + 1;
+        if get_qword(occ, slot) == 0 {
+            set_qword(keys, slot, key);
+            set_qword(vals, slot, val);
+            set_qword(occ, slot, 1);
+            let sz = get_qword(s, 4);
+            set_qword(s, 4, sz + 1);
             return 0;
         }
-        if keys[slot] == key {
-            vals[slot] = val;
+        if get_qword(keys, slot) == key {
+            set_qword(vals, slot, val);
             return 0;
         }
         slot = (slot + 1) % c;
@@ -317,15 +374,16 @@ fn map_put(self: *HashMap, key: i64, val: i64): i64 {
 }
 
 fn map_get(self: *HashMap, key: i64): i64 {
-    let c = self.cap;
-    let keys = self.keys;
-    let vals = self.vals;
-    let occ = self.occupied;
+    let s = self as i64;
+    let c = get_qword(s, 3);
+    let keys = get_qword(s, 0);
+    let vals = get_qword(s, 1);
+    let occ = get_qword(s, 2);
     let slot = map_hash_key(key, c);
     let probes = 0;
     while probes < c {
-        if occ[slot] == 0 { return -999999999; }
-        if keys[slot] == key { return vals[slot]; }
+        if get_qword(occ, slot) == 0 { return -999999999; }
+        if get_qword(keys, slot) == key { return get_qword(vals, slot); }
         slot = (slot + 1) % c;
         probes = probes + 1;
     }
@@ -339,7 +397,5 @@ fn map_has(self: *HashMap, key: i64): bool {
 }
 
 fn map_len(self: *HashMap): i64 {
-    return self.size;
+    return get_qword(self as i64, 4);
 }
-
-

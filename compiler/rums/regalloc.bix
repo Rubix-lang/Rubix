@@ -82,7 +82,15 @@ fn regalloc_compute_liveness_ex(uir_buf: i64, start_node: i64, end_node: i64, in
                     }
                 }
                 if (op >= 30) & (op <= 35) & (hints > 0) {
-                    set_qword(hints, dst, 0); # Hint comparison result to RAX / x0
+                    let cmp_ret_reg = 0; # RAX / x0
+                    if target >= 65536 { # mach_model pointer
+                        cmp_ret_reg = mach_model_get_abi_return_reg(target);
+                    } else {
+                        if target == 3 { cmp_ret_reg = 10; } # a0
+                    }
+                    if cmp_ret_reg >= 0 {
+                        set_qword(hints, dst, cmp_ret_reg);
+                    }
                 }
             }
         }

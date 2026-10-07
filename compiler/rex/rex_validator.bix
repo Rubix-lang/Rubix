@@ -195,7 +195,7 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
                 ip = ip + 4;
                 valid_op = 1;
             }
-            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SHR_I64) {
+            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SAR_I64) {
                 # Binary or Unary
                 if (op == REX_OP_NEG_I64) | (op == REX_OP_NOT_I64) {
                     if ip + 4 > body_end { return REX_ERR_TRUNCATED; }
@@ -268,6 +268,13 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
                 ip = ip + 2;
                 valid_op = 1;
             }
+            if op == REX_OP_PRINT {
+                if ip + 3 > body_end { return REX_ERR_TRUNCATED; }
+                let src = rex_read_u16(buf, ip);
+                if src >= local_cnt { return REX_ERR_INVALID_VAL_SLOT; }
+                ip = ip + 3;
+                valid_op = 1;
+            }
             if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) {
                 if ip + 8 > body_end { return REX_ERR_TRUNCATED; }
                 let dst = rex_read_u16(buf, ip);
@@ -311,7 +318,7 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
             if op == REX_OP_CONST_I64 { ip = ip + 10; }
             if op == REX_OP_CONST_I32 { ip = ip + 6; }
             if op == REX_OP_MOVE { ip = ip + 4; }
-            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SHR_I64) {
+            if (op >= REX_OP_ADD_I64) & (op <= REX_OP_SAR_I64) {
                 if (op == REX_OP_NEG_I64) | (op == REX_OP_NOT_I64) { ip = ip + 4; }
                 else { ip = ip + 6; }
             }
@@ -320,6 +327,7 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
                 let tgt = rex_read_u32(buf, ip);
                 ip = ip + 4;
                 let found = 0;
+                if tgt == body_len { found = 1; }
                 let ii = 0;
                 while ii < inst_cnt {
                     if get_qword(inst_starts, ii) == tgt { found = 1; }
@@ -334,6 +342,8 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
                 ip = ip + 8;
                 let found_t = 0;
                 let found_f = 0;
+                if tgt_t == body_len { found_t = 1; }
+                if tgt_f == body_len { found_f = 1; }
                 let ii = 0;
                 while ii < inst_cnt {
                     let istart = get_qword(inst_starts, ii);
@@ -349,6 +359,7 @@ fn rex_validate_module(buf: i64, len: i64): i64 {
             }
             if op == REX_OP_RETURN { ip = ip + 2; }
             if op == REX_OP_TRAP { ip = ip + 2; }
+            if op == REX_OP_PRINT { ip = ip + 3; }
             if (op == REX_OP_LOAD_64) | (op == REX_OP_LOAD_8) { ip = ip + 8; }
             if (op == REX_OP_STORE_64) | (op == REX_OP_STORE_8) { ip = ip + 8; }
             if (op == REX_OP_ALLOC_MEM) | (op == REX_OP_ADDR_LOCAL) { ip = ip + 6; }

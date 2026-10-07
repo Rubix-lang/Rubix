@@ -11,6 +11,14 @@ std/archive/
 tmp*
 *.tmp
 *.log
+*.core
+rubix.elf
+stage2.elf
+stage3.elf
+rubix-v*
+SHA256SUMS
+*.tar.gz
+*.tar.gz.sha256
 
 # IDE
 .vscode/

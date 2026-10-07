@@ -1,0 +1,15 @@
+# Benchmark: heavy integer loop — 50M iterations of non-foldable arithmetic.
+# Keeps a data dependency chain so the optimizer cannot collapse the loop.
+fn main(): i64 {
+    mut s = 0;
+    mut i = 0;
+    while i < 50000000 {
+        s = s + ((i * 3) >> 1);
+        s = s + (i & 7);
+        s = s - (i % 17);
+        i = i + 1;
+    }
+    let res = s & 255;
+    print res;
+    return res;
+}

@@ -323,6 +323,7 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                 set_qword(model, 95, 0);
             }
             set_qword(model, 1, tid);
+            set_qword(model, 22, -1); # zero_reg default: -1 (no hardwired zero)
 
             p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '{'
             let in_target = 1;
@@ -375,6 +376,9 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                         mach_str_copy(names_buf + (rid * 16), tok_buf);
 
                         p = mach_next_token(src, p, src_len, tok_buf, tok_info); # role
+                        if mach_tok_eq(tok_buf, "hardwired_zero") == 1 {
+                            set_qword(model, 22, rid); # zero_reg
+                        }
                         p = mach_next_token(src, p, src_len, tok_buf, tok_info); # callee_saved
                         let cs = 0;
                         if mach_tok_eq(tok_buf, "true") == 1 { cs = 1; }
@@ -495,9 +499,18 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                         if (mach_tok_eq(tok_buf, "MOV_REG_IMM") == 1) | (mach_tok_eq(tok_buf, "MOV_REG_IMM64") == 1) { pat_id = 2; }
                         if mach_tok_eq(tok_buf, "ADD_REG_REG") == 1 { pat_id = 10; }
                         if mach_tok_eq(tok_buf, "SUB_REG_REG") == 1 { pat_id = 11; }
+                        if mach_tok_eq(tok_buf, "MUL_REG_REG") == 1 { pat_id = 12; }
+                        if (mach_tok_eq(tok_buf, "DIV_REG_REG") == 1) | (mach_tok_eq(tok_buf, "SDIV_REG_REG") == 1) { pat_id = 13; }
+                        if (mach_tok_eq(tok_buf, "REM_REG_REG") == 1) | (mach_tok_eq(tok_buf, "MSUB_REG_REG_REG") == 1) { pat_id = 14; }
+                        if mach_tok_eq(tok_buf, "NEG_REG") == 1 { pat_id = 15; }
                         if mach_tok_eq(tok_buf, "AND_REG_REG") == 1 { pat_id = 20; }
                         if (mach_tok_eq(tok_buf, "OR_REG_REG") == 1) | (mach_tok_eq(tok_buf, "ORR_REG_REG") == 1) { pat_id = 21; }
                         if (mach_tok_eq(tok_buf, "XOR_REG_REG") == 1) | (mach_tok_eq(tok_buf, "EOR_REG_REG") == 1) { pat_id = 22; }
+                        if mach_tok_eq(tok_buf, "NOT_REG") == 1 { pat_id = 23; }
+                        if (mach_tok_eq(tok_buf, "SHL_REG_REG") == 1) | (mach_tok_eq(tok_buf, "LSL_REG_IMM") == 1) | (mach_tok_eq(tok_buf, "SLLI_REG_IMM") == 1) { pat_id = 24; }
+                        if (mach_tok_eq(tok_buf, "SHR_REG_REG") == 1) | (mach_tok_eq(tok_buf, "LSR_REG_IMM") == 1) | (mach_tok_eq(tok_buf, "SRLI_REG_IMM") == 1) { pat_id = 25; }
+                        if (mach_tok_eq(tok_buf, "LD_REG_MEM") == 1) | (mach_tok_eq(tok_buf, "LDR_REG_MEM") == 1) { pat_id = 42; }
+                        if (mach_tok_eq(tok_buf, "SD_MEM_REG") == 1) | (mach_tok_eq(tok_buf, "STR_MEM_REG") == 1) { pat_id = 43; }
                         if mach_tok_eq(tok_buf, "RET") == 1 { pat_id = 57; }
                         if mach_tok_eq(tok_buf, "VEC_FMA") == 1 { pat_id = 70; }
                         if mach_tok_eq(tok_buf, "VEC_DOT") == 1 { pat_id = 71; }
@@ -513,6 +526,10 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                         let pat_cost = 1;
                         let pat_lat = 1;
                         let pat_enc = 0;
+                        let pat_dst_shift = 0;
+                        let pat_s1_shift = 0;
+                        let pat_s2_shift = 0;
+                        let pat_s3_shift = 0;
                         let in_pat = 1;
                         while (p < src_len) & (in_pat == 1) {
                             p = mach_next_token(src, p, src_len, tok_buf, tok_info);
@@ -535,8 +552,28 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                                     p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ':'
                                     p = mach_next_token(src, p, src_len, tok_buf, tok_info); # val
                                     pat_enc = mach_parse_int(tok_buf);
+                                    let cur_reg_slot = -1;
                                     while (p < src_len) & (get_qword(tok_info, 0) != 59) {
                                         p = mach_next_token(src, p, src_len, tok_buf, tok_info);
+                                        if mach_tok_eq(tok_buf, "REG_ID") == 1 {
+                                            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # '('
+                                            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # operand name
+                                            cur_reg_slot = -1;
+                                            if mach_tok_eq(tok_buf, "dst") == 1 { cur_reg_slot = 4; }
+                                            if (mach_tok_eq(tok_buf, "src1") == 1) | (mach_tok_eq(tok_buf, "src") == 1) { cur_reg_slot = 5; }
+                                            if (mach_tok_eq(tok_buf, "src2") == 1) | (mach_tok_eq(tok_buf, "base") == 1) { cur_reg_slot = 6; }
+                                            if (mach_tok_eq(tok_buf, "src3") == 1) | (mach_tok_eq(tok_buf, "disp") == 1) { cur_reg_slot = 7; }
+                                            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # ')'
+                                        }
+                                        if (get_qword(tok_info, 0) == 60) | (mach_tok_eq(tok_buf, "<<") == 1) {
+                                            p = mach_next_token(src, p, src_len, tok_buf, tok_info); # shift int
+                                            let sval = mach_parse_int(tok_buf);
+                                            if cur_reg_slot == 4 { pat_dst_shift = sval; }
+                                            if cur_reg_slot == 5 { pat_s1_shift = sval; }
+                                            if cur_reg_slot == 6 { pat_s2_shift = sval; }
+                                            if cur_reg_slot == 7 { pat_s3_shift = sval; }
+                                            cur_reg_slot = -1;
+                                        }
                                     }
                                 }
                             }
@@ -549,6 +586,10 @@ fn machdesc_parse(src: i64, src_len: i64, model: i64): i64 {
                         set_qword(pbase, 1, pat_cost);
                         set_qword(pbase, 2, pat_lat);
                         set_qword(pbase, 3, pat_enc);
+                        set_qword(pbase, 4, pat_dst_shift);
+                        set_qword(pbase, 5, pat_s1_shift);
+                        set_qword(pbase, 6, pat_s2_shift);
+                        set_qword(pbase, 7, pat_s3_shift);
                         set_qword(model, 16, pcnt + 1);
                     }
                 }
@@ -578,9 +619,72 @@ fn machdesc_validate(model: i64): i64 {
     if (ret_reg < 0) | (ret_reg >= rcnt) { return -14; } # Invalid return register
     let sc_cnt = get_qword(model, 11);
     if sc_cnt <= 0 { return -15; }                       # Empty scratch pool
+
+    # Validate that every register in scratch pool is within [0, rcnt)
+    let sci = 0;
+    while sci < sc_cnt {
+        let sr = get_qword(model, 48 + sci);
+        if (sr < 0) | (sr >= rcnt) { return -15; }
+        sci = sci + 1;
+    }
+
+    # Validate that hardwired zero register (if defined) is NOT in scratch pool
+    let zero_reg = get_qword(model, 22);
+    if zero_reg >= 0 {
+        let z_i = 0;
+        while z_i < sc_cnt {
+            if get_qword(model, 48 + z_i) == zero_reg {
+                return -18; # Hardwired zero register cannot be in scratch pool
+            }
+            z_i = z_i + 1;
+        }
+    }
+
+    # Validate uniqueness of registers in scratch pool
+    let sp_i = 0;
+    while sp_i < sc_cnt {
+        let sp_j = sp_i + 1;
+        while sp_j < sc_cnt {
+            if get_qword(model, 48 + sp_i) == get_qword(model, 48 + sp_j) {
+                return -19; # Duplicate register in scratch pool
+            }
+            sp_j = sp_j + 1;
+        }
+        sp_i = sp_i + 1;
+    }
+
     let pcnt = get_qword(model, 16);
     if pcnt <= 0 { return -16; }                         # No patterns
-    return 0;                                            # Valid!
+
+    # Validate uniqueness of pattern IDs
+    let pi = 0;
+    while pi < pcnt {
+        let p_id_i = get_qword(model + 2048 + (pi * 64), 0);
+        let pj = pi + 1;
+        while pj < pcnt {
+            let p_id_j = get_qword(model + 2048 + (pj * 64), 0);
+            if (p_id_i > 0) & (p_id_i == p_id_j) {
+                return -17; # Duplicate pattern ID found in machine description
+            }
+            pj = pj + 1;
+        }
+        pi = pi + 1;
+    }
+
+    # Verify required core machine patterns exist: RET (57) and ADD (10)
+    let has_ret = 0;
+    let has_add = 0;
+    let pk = 0;
+    while pk < pcnt {
+        let pid = get_qword(model + 2048 + (pk * 64), 0);
+        if pid == 57 { has_ret = 1; }
+        if pid == 10 { has_add = 1; }
+        pk = pk + 1;
+    }
+    if has_ret == 0 { return -18; }                      # Missing required RET pattern
+    if has_add == 0 { return -19; }                      # Missing required ADD pattern
+
+    return 0;                                            # Model verified successfully!
 }
 
 fn mach_read_all(fd: i64, buf: i64, max_len: i64): i64 {
@@ -719,15 +823,23 @@ fn mach_model_pattern_cost(model: i64, pat_id: i64): i64 {
     return 1; # Default cost 1
 }
 
-fn mach_model_pattern_encoding(model: i64, pat_id: i64): i64 {
+fn mach_model_find_pattern(model: i64, pat_id: i64): i64 {
     let pcnt = get_qword(model, 16);
     let i = 0;
     while i < pcnt {
         let pbase = model + 2048 + (i * 64);
         if get_qword(pbase, 0) == pat_id {
-            return get_qword(pbase, 3);
+            return i;
         }
         i = i + 1;
+    }
+    return -1;
+}
+
+fn mach_model_pattern_encoding(model: i64, pat_id: i64): i64 {
+    let idx = mach_model_find_pattern(model, pat_id);
+    if idx >= 0 {
+        return get_qword(model + 2048 + (idx * 64), 3);
     }
     return 0;
 }
@@ -817,6 +929,16 @@ fn mach_model_emit_epilogue(model: i64, code_buf: i64, cur: i64, frame_sz: i64):
 }
 
 fn mach_model_emit_bin_op(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64, s1: i64, s2: i64): i64 {
+    let pat_idx = mach_model_find_pattern(model, op);
+    if pat_idx >= 0 {
+        let pbase = model + 2048 + (pat_idx * 64);
+        let base_op = get_qword(pbase, 3);
+        let dst_shift = get_qword(pbase, 4);
+        let s1_shift = get_qword(pbase, 5);
+        let s2_shift = get_qword(pbase, 6);
+        let word = base_op | (s2 << s2_shift) | (s1 << s1_shift) | (dst << dst_shift);
+        return mach_emit_u32(code_buf, cur, word);
+    }
     let tid = get_qword(model, 1);
     if tid == 2 {
         if op == 10 { return mach_emit_u32(code_buf, cur, 2332033024 | (s2 << 16) | (s1 << 5) | dst); }
@@ -839,16 +961,19 @@ fn mach_model_emit_bin_op(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64
         if op == 25 { return mach_emit_u32(code_buf, cur, 1073762355 | (s2 << 20) | (s1 << 15) | (dst << 7)); }
     }
     if tid == 99 {
-        let base_op = mach_model_pattern_encoding(model, op);
-        if base_op == 0 {
-            if op == 10 { base_op = 33554432; }
-            if op == 11 { base_op = 50331648; }
+        if op == 10 { base_op = 33554432; }
+        if op == 11 { base_op = 50331648; }
+        if base_op != 0 {
+            let dst_shift = get_qword(model, 80);
+            let s1_shift = get_qword(model, 81);
+            let s2_shift = get_qword(model, 82);
+            let word = base_op | (s2 << s2_shift) | (s1 << s1_shift) | (dst << dst_shift);
+            return mach_emit_u32(code_buf, cur, word);
         }
-        let dst_shift = get_qword(model, 80);
-        let s1_shift = get_qword(model, 81);
-        let s2_shift = get_qword(model, 82);
-        let word = base_op | (s2 << s2_shift) | (s1 << s1_shift) | (dst << dst_shift);
-        return mach_emit_u32(code_buf, cur, word);
+    }
+    if tid != 1 {
+        # Target has no lowering pattern for this binary opcode
+        return -1;
     }
     # x86-64
     let p = cur;
@@ -939,12 +1064,24 @@ fn mach_model_emit_bin_op(model: i64, code_buf: i64, cur: i64, op: i64, dst: i64
 }
 
 fn mach_model_emit_mov_reg(model: i64, code_buf: i64, cur: i64, dst: i64, src: i64): i64 {
+    let pat_idx = mach_model_find_pattern(model, 1); # MOV_REG_REG
+    if pat_idx >= 0 {
+        let pbase = model + 2048 + (pat_idx * 64);
+        let base_op = get_qword(pbase, 3);
+        let dst_shift = get_qword(pbase, 4);
+        let src_shift = get_qword(pbase, 5);
+        return mach_emit_u32(code_buf, cur, base_op | (src << src_shift) | (dst << dst_shift));
+    }
     let tid = get_qword(model, 1);
     if tid == 2 {
-        return mach_emit_u32(code_buf, cur, 2852127712 | (src << 16) | dst);
+        let base_op = mach_model_pattern_encoding(model, 1); # MOV_REG_REG
+        if base_op == 0 { base_op = 2852127712; }
+        return mach_emit_u32(code_buf, cur, base_op | (src << 16) | dst);
     }
     if tid == 3 {
-        return mach_emit_u32(code_buf, cur, 19 | (src << 15) | (dst << 7));
+        let base_op = mach_model_pattern_encoding(model, 1); # MOV_REG_REG
+        if base_op == 0 { base_op = 19; }
+        return mach_emit_u32(code_buf, cur, base_op | (src << 15) | (dst << 7));
     }
     if tid == 99 {
         return mach_emit_u32(code_buf, cur, 16777216 | (src << 8) | dst);
@@ -959,16 +1096,32 @@ fn mach_model_emit_mov_reg(model: i64, code_buf: i64, cur: i64, dst: i64, src: i
 fn mach_model_emit_mov_imm(model: i64, code_buf: i64, cur: i64, dst: i64, imm: i64): i64 {
     let tid = get_qword(model, 1);
     if tid == 2 {
-        if imm < 0 {
+        if (imm >= 0) & (imm <= 65535) {
+            return mach_emit_u32(code_buf, cur, 3531603968 | (imm << 5) | dst);
+        }
+        if (imm < 0) & (imm >= -65536) {
             let inv16 = (0 - imm - 1) & 65535;
             return mach_emit_u32(code_buf, cur, 2457862144 | (inv16 << 5) | dst);
         }
-        let imm16 = imm & 65535;
-        return mach_emit_u32(code_buf, cur, 3531603968 | (imm16 << 5) | dst);
+        let imm_u32 = imm & 4294967295;
+        let lo16 = imm_u32 & 65535;
+        let hi16 = (imm_u32 >> 16) & 65535;
+        let cur1 = mach_emit_u32(code_buf, cur, 3531603968 | (lo16 << 5) | dst);
+        if hi16 != 0 {
+            return mach_emit_u32(code_buf, cur1, 4070572032 | (hi16 << 5) | dst);
+        }
+        return cur1;
     }
     if tid == 3 {
-        let imm12 = imm & 4095;
-        return mach_emit_u32(code_buf, cur, 19 | (imm12 << 20) | (dst << 7));
+        if (imm >= -2048) & (imm <= 2047) {
+            let imm12 = imm & 4095;
+            return mach_emit_u32(code_buf, cur, 19 | (imm12 << 20) | (dst << 7));
+        }
+        let imm_u32 = imm & 4294967295;
+        let lo12 = imm_u32 & 4095;
+        let hi20 = ((imm_u32 + 2048) >> 12) & 1048575;
+        let cur1 = mach_emit_u32(code_buf, cur, 55 | (hi20 << 12) | (dst << 7));
+        return mach_emit_u32(code_buf, cur1, 27 | (lo12 << 20) | (dst << 15) | (dst << 7));
     }
     if tid == 99 {
         return mach_emit_u32(code_buf, cur, 67108864 | ((dst & 255) << 24) | (imm & 16777215));
@@ -991,6 +1144,10 @@ fn mach_model_emit_mov_imm(model: i64, code_buf: i64, cur: i64, dst: i64, imm: i
 }
 
 fn mach_model_emit_return(model: i64, code_buf: i64, cur: i64): i64 {
+    let ret_enc = mach_model_pattern_encoding(model, 57); # RET
+    if ret_enc != 0 {
+        return mach_emit_u32(code_buf, cur, ret_enc);
+    }
     let tid = get_qword(model, 1);
     if tid == 2 {
         return mach_emit_u32(code_buf, cur, 3596551104);

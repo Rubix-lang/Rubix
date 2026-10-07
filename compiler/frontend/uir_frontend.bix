@@ -183,7 +183,7 @@ fn uf_parse_type(s: i64): i64 {
         }
         return 0;
     }
-    if (tk == TOKEN_TYPE_I64) | ((tk >= 35) & (tk <= 39)) | (tk == 46) {
+    if (tk == TOKEN_TYPE_I64) | ((tk >= 35) & (tk <= 39)) | (tk == 46) | (tk == 66) | (tk == 67) | (tk == 75) {
         uf_advance(s);
         return 0;
     }
@@ -281,19 +281,27 @@ fn uf_parse_expr(s: i64, min_prec: i64): i64 {
         uir_emit(uir_buf, UIR_SUB, TYPE_I64, 0, 0, neg_v, z_v, rhs, 0);
         left = neg_v;
     } else {
-        # Unary bitwise NOT (~): rhs ^ -1
-        if k == TOKEN_TILDE {
+        # Unary bitwise NOT (~) or logical NOT (!):
+        if (k == TOKEN_TILDE) | (k == 49) {
             uf_advance(s);
             let rhs = uf_parse_expr(s, 8);
             if rhs < 0 {
                 set_qword(s, 273, -1);
                 return -1;
             }
-            let m1_v = get_qword(s, 4); set_qword(s, 4, m1_v + 1);
-            uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, m1_v, -1, 0, 0);
-            let not_v = get_qword(s, 4); set_qword(s, 4, not_v + 1);
-            uir_emit(uir_buf, 22, TYPE_I64, 0, 0, not_v, rhs, m1_v, 0); # XOR
-            left = not_v;
+            if k == 49 { # logical NOT (!) -> rhs == 0
+                let z_v = get_qword(s, 4); set_qword(s, 4, z_v + 1);
+                uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, z_v, 0, 0, 0);
+                let not_v = get_qword(s, 4); set_qword(s, 4, not_v + 1);
+                uir_emit(uir_buf, 30, TYPE_I64, 0, 0, not_v, rhs, z_v, 0); # CMP_EQ (rhs == 0)
+                left = not_v;
+            } else { # bitwise NOT (~) -> rhs ^ -1
+                let m1_v = get_qword(s, 4); set_qword(s, 4, m1_v + 1);
+                uir_emit(uir_buf, UIR_CONST, TYPE_I64, 1, 0, m1_v, -1, 0, 0);
+                let not_v = get_qword(s, 4); set_qword(s, 4, not_v + 1);
+                uir_emit(uir_buf, 22, TYPE_I64, 0, 0, not_v, rhs, m1_v, 0); # XOR
+                left = not_v;
+            }
         } else {
             # Primary expression: integer, float, string, char, or bool literal
             if (k == TOKEN_INT_LIT) | (k == TOKEN_FLOAT_LIT) | (k == TOKEN_STR_LIT) | (k == TOKEN_CHAR_LIT) | (k == 40) | (k == 41) {

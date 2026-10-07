@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Rubix
+        run: |
+          chmod +x ./bin/rubix
+          ./bin/rubix compile compiler/main.bix -o rubix.elf
+          chmod +x rubix.elf
+          
+      - name: Verify Bootstrap
+        run: |
+          ./rubix.elf compile compiler/main.bix -o rubix2.elf
+          cmp rubix.elf rubix2.elf
+          
+      - name: Install QEMU for Cross-Target Testing
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+
+      - name: Run Test Suite
+        run: |
+          chmod +x ./scripts/test.sh
+          ./scripts/test.sh
+          
+      - name: Test Examples
+        run: |
+          for f in examples/*.bix; do
+            echo "Testing $f..."
+            ./rubix.elf run "$f"
+          done
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Release Binary and Archive
+        run: |
+          chmod +x ./bin/rubix ./scripts/release.bix ./scripts/build.bix ./scripts/test.sh
+          ./scripts/release.bix ${{ github.ref_name }}
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            rubix-${{ github.ref_name }}-linux-x86_64
+            rubix-${{ github.ref_name }}-linux-x86_64.tar.gz
+            rubix-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+            SHA256SUMS
+          generate_release_notes: true

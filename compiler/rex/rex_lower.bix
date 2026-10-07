@@ -282,21 +282,39 @@ fn rex_lower_uir_program(uir_buf: i64, code_buf: i64): i64 {
             if op == 56 { # UIR_CALL
                 let target_fn_hash = s1;
                 let arg_cnt = s2;
-                # Find target function index
-                let target_fidx = -1;
-                let ti = 0;
-                while ti < func_cnt {
-                    if get_qword(func_meta, ti * 8 + 0) == target_fn_hash {
-                        target_fidx = ti;
+                if (target_fn_hash == 210724587794) | (target_fn_hash == 229479076111340) {
+                    let is_nl = 0;
+                    if target_fn_hash == 229479076111340 { is_nl = 1; }
+                    let print_slot = get_qword(call_args_buf, 0);
+                    cp = rex_enc_print(sec_code_buf, cp, print_slot, is_nl);
+                    if dst != 65535 {
+                        cp = rex_enc_const_i64(sec_code_buf, cp, dst, 0);
                     }
-                    ti = ti + 1;
-                }
-                if target_fidx >= 0 {
-                    cp = rex_enc_call(sec_code_buf, cp, dst, target_fidx, arg_cnt, call_args_buf);
                 } else {
-                    return -3; # Unresolved function call
+                    if target_fn_hash == 193505547 { # sar(val, shift)
+                        let v_slot = get_qword(call_args_buf, 0);
+                        let s_slot = get_qword(call_args_buf, 1);
+                        if dst != 65535 {
+                            cp = rex_enc_bin_op(sec_code_buf, cp, REX_OP_SAR_I64, dst, v_slot, s_slot);
+                        }
+                    } else {
+                        # Find target function index
+                        let target_fidx = -1;
+                    let ti = 0;
+                    while ti < func_cnt {
+                        if get_qword(func_meta, ti * 8 + 0) == target_fn_hash {
+                            target_fidx = ti;
+                        }
+                        ti = ti + 1;
+                    }
+                    if target_fidx >= 0 {
+                        cp = rex_enc_call(sec_code_buf, cp, dst, target_fidx, arg_cnt, call_args_buf);
+                    } else {
+                        return -3; # Unresolved function call
+                    }
                 }
             }
+        }
             if op == 57 { # RETURN
                 let rslot = s1;
                 if imm1 == 1 {

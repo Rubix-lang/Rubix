@@ -60,6 +60,12 @@ calling_convention standard {
 }
 
 patterns {
+    pattern MOV_REG_REG(dst, src) {
+        cost: 1;
+        latency: 1;
+        encoding_u32: 0x00000013 | (REG_ID(src) << 15) | (REG_ID(dst) << 7);
+    }
+
     pattern ADD_REG_REG(dst, src1, src2) {
         cost: 1;
         latency: 1;

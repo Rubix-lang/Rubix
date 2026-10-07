@@ -249,7 +249,7 @@ fn diag_report_error_loc(path: i64, code: i64, src: i64, src_len: i64, offset: i
 
     cur = diag_write_message(buf, cur, code);
 
-    if (src != 0) & (offset >= 0) & (src_len > 0) {
+    if (src != 0) & (offset >= 0) & (offset < src_len) & (src_len > 0) {
         let info = buf + 2048;
         diag_get_line_col(src, src_len, offset, info);
         let line = get_qword(info, 0);
@@ -287,8 +287,10 @@ fn diag_report_error_loc(path: i64, code: i64, src: i64, src_len: i64, offset: i
 
         # Underline with caret
         cur = diag_write_str(buf, cur, "\n   | ", 6);
+        let max_sp = col;
+        if max_sp > 120 { max_sp = 120; }
         let sp = 1;
-        while sp < col {
+        while sp < max_sp {
             set_byte(buf, cur, 32); # ' '
             cur = cur + 1;
             sp = sp + 1;

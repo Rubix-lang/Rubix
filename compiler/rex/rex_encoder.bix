@@ -173,3 +173,10 @@ fn rex_enc_addr_local(buf: i64, p: i64, dst: i64, offset: i64): i64 {
     cur = rex_emit_u32(buf, cur, offset);
     return cur;
 }
+
+fn rex_enc_print(buf: i64, p: i64, src: i64, is_nl: i64): i64 {
+    let cur = rex_emit_u8(buf, p, REX_OP_PRINT);
+    cur = rex_emit_u16(buf, cur, src);
+    cur = rex_emit_u8(buf, cur, is_nl);
+    return cur;
+}

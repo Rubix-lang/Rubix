@@ -1,13 +1,12 @@
 #include <stdio.h>
 
+long long fib(long long n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
 int main(void) {
-  long long s = 0;
-  long long i;
-  for (i = 0; i < 50000000; i++) {
-    s += (i * 3) >> 1;
-    s += i & 7;
-    s -= i % 17;
-  }
-  printf("%lld\n", s & 255);
-  return 0;
+    long long res = fib(30);
+    printf("%lld\n", res);
+    return 0;
 }

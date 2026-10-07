@@ -50,6 +50,7 @@ let REX_OP_XOR_I64   = 24;  # 0x18: dst:u16, s1:u16, s2:u16
 let REX_OP_NOT_I64   = 25;  # 0x19: dst:u16, src:u16
 let REX_OP_SHL_I64   = 26;  # 0x1A: dst:u16, s1:u16, s2:u16
 let REX_OP_SHR_I64   = 27;  # 0x1B: dst:u16, s1:u16, s2:u16
+let REX_OP_SAR_I64   = 28;  # 0x1C: dst:u16, s1:u16, s2:u16
 
 # Comparisons (result is i64: 1 for true, 0 for false)
 let REX_OP_CMP_EQ    = 32;  # 0x20: dst:u16, s1:u16, s2:u16
@@ -65,6 +66,7 @@ let REX_OP_BRANCH    = 49;  # 0x31: cond:u16, target_true:u32, target_false:u32
 let REX_OP_CALL      = 50;  # 0x32: dst:u16, func_idx:u32, arg_cnt:u16, args:[u16...]
 let REX_OP_RETURN    = 51;  # 0x33: src:u16 (or 0xFFFF for void)
 let REX_OP_TRAP      = 52;  # 0x34: code:u16
+let REX_OP_PRINT     = 53;  # 0x35: src:u16, is_nl:u8
 
 # Memory Operations (Bounded Linear Memory)
 let REX_OP_LOAD_64   = 64;  # 0x40: dst:u16, base:u16, offset:i32
@@ -99,3 +101,32 @@ let REX_TRAP_OUT_OF_BOUNDS  = 2;
 let REX_TRAP_STACK_OVERFLOW = 3;
 let REX_TRAP_ILLEGAL_STATE  = 4;
 let REX_TRAP_EXPLICIT       = 5;
+
+fn rex_format_i64(buf: i64, num: i64): i64 {
+    let n = num;
+    let cur = 0;
+    if n < 0 {
+        set_byte(buf, cur, 45); # '-'
+        cur = cur + 1;
+        n = 0 - n;
+    }
+    if n == 0 {
+        set_byte(buf, cur, 48); # '0'
+        return cur + 1;
+    }
+    let digits_buf = buf + 512;
+    let dcount = 0;
+    while n > 0 {
+        let rem = n % 10;
+        set_byte(digits_buf, dcount, 48 + rem);
+        dcount = dcount + 1;
+        n = n / 10;
+    }
+    let j = dcount - 1;
+    while j >= 0 {
+        set_byte(buf, cur, get_byte(digits_buf, j));
+        cur = cur + 1;
+        j = j - 1;
+    }
+    return cur;
+}

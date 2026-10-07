@@ -408,6 +408,16 @@ fn rex_compile_module(buf: i64, len: i64, code_buf: i64): i64 {
                 p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 211); p = rex_x86_emit_byte(code_buf, p, 232); # shr rax, cl
                 p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
             }
+            if op == REX_OP_SAR_I64 {
+                let dst = rex_read_u16(buf, ip);
+                let s1 = rex_read_u16(buf, ip + 2);
+                let s2 = rex_read_u16(buf, ip + 4);
+                ip = ip + 6;
+                p = rex_x86_emit_load_slot(code_buf, p, 0, s1);
+                p = rex_x86_emit_load_slot(code_buf, p, 1, s2);
+                p = rex_x86_emit_byte(code_buf, p, 72); p = rex_x86_emit_byte(code_buf, p, 211); p = rex_x86_emit_byte(code_buf, p, 248); # sar rax, cl
+                p = rex_x86_emit_store_slot(code_buf, p, dst, 0);
+            }
             if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) {
                 let dst = rex_read_u16(buf, ip);
                 let s1 = rex_read_u16(buf, ip + 2);
@@ -574,6 +584,13 @@ fn rex_compile_module(buf: i64, len: i64, code_buf: i64): i64 {
                 set_qword(trap_exp_patches, trap_exp_cnt, p);
                 trap_exp_cnt = trap_exp_cnt + 1;
                 p = rex_x86_emit_u32(code_buf, p, 0);
+            }
+            if op == REX_OP_PRINT {
+                let src = rex_read_u16(buf, ip);
+                let is_nl = get_byte(buf, ip + 2);
+                ip = ip + 3;
+                p = rex_x86_emit_load_slot(code_buf, p, 7, src); # rdi
+                p = emit_print_val_rdi(code_buf, p, 1, is_nl);
             }
         }
 

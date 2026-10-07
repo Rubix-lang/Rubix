@@ -222,6 +222,13 @@ fn rex_interpret_module(buf: i64, len: i64): i64 {
             set_qword(cur_locals, dst, get_qword(cur_locals, s1) >> get_qword(cur_locals, s2));
             cur_pc = cur_pc + 7;
         }
+        if op == REX_OP_SAR_I64 {
+            let dst = rex_read_u16(buf, ip + 1);
+            let s1 = rex_read_u16(buf, ip + 3);
+            let s2 = rex_read_u16(buf, ip + 5);
+            set_qword(cur_locals, dst, get_qword(cur_locals, s1) >> get_qword(cur_locals, s2));
+            cur_pc = cur_pc + 7;
+        }
         if (op >= REX_OP_CMP_EQ) & (op <= REX_OP_CMP_GE) {
             let dst = rex_read_u16(buf, ip + 1);
             let s1 = rex_read_u16(buf, ip + 3);
@@ -304,6 +311,20 @@ fn rex_interpret_module(buf: i64, len: i64): i64 {
         if op == REX_OP_TRAP {
             let tcode = rex_read_u16(buf, ip + 1);
             return 0 - tcode;
+        }
+        if op == REX_OP_PRINT {
+            let src = rex_read_u16(buf, ip + 1);
+            let is_nl = get_byte(buf, ip + 3);
+            let v = get_qword(cur_locals, src);
+            let pbuf = sys_mmap_page();
+            let plen = rex_format_i64(pbuf, v);
+            if is_nl != 0 {
+                set_byte(pbuf, plen, 10);
+                plen = plen + 1;
+            }
+            sys_write(1, pbuf, plen);
+            sys_munmap(pbuf, 4096);
+            cur_pc = cur_pc + 4;
         }
         if op == REX_OP_LOAD_64 {
             let dst = rex_read_u16(buf, ip + 1);

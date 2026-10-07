@@ -2,7 +2,7 @@
   "name": "rubix-lang",
   "displayName": "Rubix Language Support",
   "description": "Official IDE language support for the Rubix programming language (*.bix)",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "publisher": "rubix-lang",
   "license": "MIT",
   "repository": {

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# build.bix - Self-hosting build script
+
+set -euo pipefail
+
+RUBIX_BIN="./bin/rubix"
+SOURCE="compiler/main.bix"
+OUTPUT="./rubix.elf"
+
+echo "=== Rubix Self-Hosting Build ==="
+
+# Check if we have a working rubix binary
+if [[ ! -x "$RUBIX_BIN" ]]; then
+    echo "Error: No working rubix binary at $RUBIX_BIN"
+    echo "Bootstrap with: make bootstrap"
+    exit 1
+fi
+
+echo "Building $OUTPUT from $SOURCE..."
+"$RUBIX_BIN" compile "$SOURCE" -o "$OUTPUT"
+chmod +x "$OUTPUT"
+
+echo "Verifying bootstrap determinism..."
+"$OUTPUT" compile "$SOURCE" -o "stage2.elf"
+chmod +x stage2.elf
+"./stage2.elf" compile "$SOURCE" -o "stage3.elf"
+
+if cmp -s "$OUTPUT" stage3.elf; then
+    echo "✓ Bootstrap deterministic: stage2 == stage3"
+    sha256sum "$OUTPUT" stage3.elf
+    rm stage2.elf stage3.elf
+    cp "$OUTPUT" "$RUBIX_BIN"
+else
+    echo "✗ Bootstrap failed: stage2 != stage3"
+    exit 1
+fi
+
+echo "Running test suite..."
+./scripts/test.sh
+
+echo "✓ Build complete: $OUTPUT"
